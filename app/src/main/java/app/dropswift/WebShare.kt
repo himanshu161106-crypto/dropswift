@@ -1,6 +1,9 @@
 package app.dropswift
 
+import android.content.ContentValues
 import android.content.Context
+import android.net.Uri
+import android.provider.MediaStore
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.Closeable
@@ -13,6 +16,7 @@ import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
@@ -27,8 +31,14 @@ import kotlin.concurrent.thread
 class WebShare(
     private val ctx: Context,
     private val items: List<Transfer.Item>,
-    private val secret: String
+    private val secret: String,
+    private val onSaved: (String, Uri) -> Unit = { _, _ -> }
 ) : Closeable {
+
+    /** Files sent to this phone from a browser (iPhone / laptop). */
+    val upBytes = AtomicLong(0)
+    val upActive = AtomicInteger(0)
+    val uploaded = AtomicInteger(0)
 
     val bytes = AtomicLong(0)
     val active = AtomicInteger(0)
@@ -82,19 +92,22 @@ class WebShare(
             val request = readLine(inp) ?: return
             var range: String? = null
             var agent = ""
+            var length = -1L
             while (true) {
                 val h = readLine(inp) ?: break
                 if (h.isEmpty()) break
                 val lower = h.lowercase(Locale.US)
                 if (lower.startsWith("range:")) range = h.substring(6).trim()
                 if (lower.startsWith("user-agent:")) agent = h.substring(11).trim()
+                if (lower.startsWith("content-length:")) length = h.substring(15).trim().toLongOrNull() ?: -1L
             }
             val parts = request.split(" ")
             if (parts.size < 2) return
             val method = parts[0]
             val path = parts[1].substringBefore('?')
             val head = method == "HEAD"
-            if (method != "GET" && !head) {
+            val put = method == "PUT"
+            if (method != "GET" && !head && !put) {
                 simple(out, 405, "Method not allowed")
                 return
             }
@@ -109,6 +122,15 @@ class WebShare(
                 return
             }
             val rest = path.substring(prefix.length)
+            if (put) {
+                if (!rest.startsWith("up/") || length < 0) {
+                    simple(out, 400, "Bad request")
+                    return
+                }
+                lastClient = deviceFrom(agent)
+                receiveUpload(inp, out, URLDecoder.decode(rest.substring(3), "UTF-8"), length)
+                return
+            }
             if (rest.isEmpty()) {
                 page(out, head)
                 return
@@ -169,7 +191,22 @@ class WebShare(
             sb.append("<a class='f' href='").append(link).append("' download><b>")
                 .append(esc(item.name)).append("</b><span>").append(size(item.size)).append("</span></a>")
         }
-        sb.append("<p>Sender phone pe DropSwift khula rakho jab tak download chal raha hai.</p></body></html>")
+        sb.append("""<h1 style='font-size:20px;margin-top:26px'>Is phone ko file bhejo</h1>
+<p>Neeche se file chuno, woh Android phone ke Download/DropSwift mein save hogi.</p>
+<input type='file' id='u' multiple style='color:#eef4fb;font-size:16px'>
+<p id='st' style='color:#00e68a;font-size:16px'></p>
+<script>
+var u=document.getElementById('u'),st=document.getElementById('st');
+u.onchange=function(){var fs=[].slice.call(u.files),i=0;
+function next(){if(i>=fs.length){st.textContent='Sab bhej diya: '+fs.length+' file';return}
+var f=fs[i],x=new XMLHttpRequest();x.open('PUT','up/'+encodeURIComponent(f.name));
+x.upload.onprogress=function(e){if(e.total)st.textContent=(i+1)+'/'+fs.length+'  '+f.name+'  '+Math.round(e.loaded*100/e.total)+'%'};
+x.onload=function(){if(x.status==200){i++;next()}else{st.textContent='Nahi gayi: '+f.name}};
+x.onerror=function(){st.textContent='Link toot gaya: '+f.name};
+x.send(f)}
+next()};
+</script>""")
+        sb.append("<p>Android phone pe DropSwift khula rakho jab tak kaam chal raha hai.</p></body></html>")
         val body = sb.toString().toByteArray(Charsets.UTF_8)
         out.write(
             ("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n" +
@@ -177,6 +214,42 @@ class WebShare(
         )
         if (!head) out.write(body)
         out.flush()
+    }
+
+    private fun receiveUpload(inp: InputStream, out: OutputStream, rawName: String, length: Long) {
+        val name = Transfer.cleanName(rawName)
+        val uri = Transfer.newDownload(ctx, name)
+        var ok = false
+        upActive.incrementAndGet()
+        try {
+            val os = ctx.contentResolver.openOutputStream(uri) ?: throw IOException("cannot create")
+            os.use { o ->
+                val buf = ByteArray(1 shl 20)
+                var left = length
+                while (left > 0) {
+                    val n = inp.read(buf, 0, minOf(buf.size.toLong(), left).toInt())
+                    if (n < 0) throw IOException("upload cut")
+                    o.write(buf, 0, n)
+                    upBytes.addAndGet(n.toLong())
+                    left -= n
+                }
+            }
+            val v = ContentValues()
+            v.put(MediaStore.Downloads.IS_PENDING, 0)
+            ctx.contentResolver.update(uri, v, null, null)
+            ok = true
+            uploaded.incrementAndGet()
+            onSaved(name, uri)
+            simple(out, 200, "OK")
+        } finally {
+            upActive.decrementAndGet()
+            if (!ok) {
+                try {
+                    ctx.contentResolver.delete(uri, null, null)
+                } catch (_: Exception) {
+                }
+            }
+        }
     }
 
     private fun sendFile(out: OutputStream, item: Transfer.Item, rangeHeader: String?, head: Boolean) {

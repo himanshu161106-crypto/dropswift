@@ -118,6 +118,8 @@ class MainActivity : Activity() {
     private var hostPass = ""
     private var showingUrlQr = false
     private var hostLan = false
+    private var hostReceiveOnly = false
+    private val webSaved: MutableList<Pair<String, Uri>> = Collections.synchronizedList(ArrayList())
     private var hostAddress = ""
     private var lanQr = ""
     private var web: WebShare? = null
@@ -710,8 +712,18 @@ class MainActivity : Activity() {
         if (active) return
         AlertDialog.Builder(this)
             .setTitle("Bhejne wala phone kahan hai?")
-            .setItems(arrayOf("Paas mein - uska QR scan karo", "Bahut door - internet code se")) { _, which ->
-                if (which == 0) ensureNearby { openScanner() } else startInternetReceive()
+            .setItems(
+                arrayOf(
+                    "Paas mein - uska QR scan karo",
+                    "iPhone ya laptop se lena (browser se)",
+                    "Bahut door - internet code se"
+                )
+            ) { _, which ->
+                when (which) {
+                    0 -> ensureNearby { openScanner() }
+                    1 -> ensureNearby { startHosting(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ, true) }
+                    else -> startInternetReceive()
+                }
             }
             .show()
     }
@@ -930,11 +942,12 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------- nearby: sender is the host
 
-    private fun startHosting(band: Int) {
-        val uris = pickedUris
-        if (uris.isEmpty()) return
+    private fun startHosting(band: Int, receiveOnly: Boolean = false) {
+        val uris = if (receiveOnly) emptyList() else pickedUris
+        if (!receiveOnly && uris.isEmpty()) return
         val gen = beginSession()
         hosting = true
+        hostReceiveOnly = receiveOnly
         showTip(phoneCheck(false))
         say("Link bana raha hoon...")
         thread(name = "ds-describe") {
@@ -1000,7 +1013,11 @@ class MainActivity : Activity() {
         altView.text = "iPhone ya laptop pe lena hai? Yahan dabao"
         altView.visibility = View.VISIBLE
         btnCancel.text = "Band karo"
-        say("Ready! Lene wale phone pe DropSwift → Receive → yeh QR scan karo. 3 ya zyada phone bhi ek-ek karke scan kar sakte hain.")
+        if (hostReceiveOnly) {
+            say("Ready! iPhone: 1) camera se yeh QR scan karke Wi-Fi Join karo. 2) Neeche 'iPhone ya laptop' dabao aur doosra QR scan karo. 3) Safari ke page pe 'Is phone ko file bhejo' se file chuno.")
+        } else {
+            say("Ready! Lene wale phone pe DropSwift → Receive → yeh QR scan karo. 3 ya zyada phone bhi ek-ek karke scan kar sakte hain.")
+        }
         showLinkBand(gen, 0)
         startServers(gen, pass)
     }
@@ -1081,7 +1098,16 @@ class MainActivity : Activity() {
             }
         }
         try {
-            val w = WebShare(applicationContext, hostItems, pass)
+            val w = WebShare(applicationContext, hostItems, pass) { name, uri ->
+                webSaved.add(Pair(name, uri))
+                log("browser upload saved: $name")
+                ui.post {
+                    if (gen == generation) {
+                        showReceived(synchronized(webSaved) { ArrayList(webSaved) })
+                        say("$name aa gayi (browser se). Download/DropSwift mein save hai.")
+                    }
+                }
+            }
             w.start { c -> track(c) }
             track(w)
             web = w
@@ -1174,9 +1200,9 @@ class MainActivity : Activity() {
         val list = synchronized(peers) { ArrayList(peers) }
         val w = web
         val now = SystemClock.elapsedRealtime()
-        val moved = list.sumOf { it.p.done.get() } + (w?.bytes?.get() ?: 0L)
+        val moved = list.sumOf { it.p.done.get() } + (w?.bytes?.get() ?: 0L) + (w?.upBytes?.get() ?: 0L)
         val dt = (now - lastTickAt) / 1000.0
-        if (dt > 0 && (list.any { !it.done } || (w?.active?.get() ?: 0) > 0)) {
+        if (dt > 0 && (list.any { !it.done } || (w?.active?.get() ?: 0) > 0 || (w?.upActive?.get() ?: 0) > 0)) {
             speedView.text = String.format(Locale.US, "%.1f MB/s", (moved - lastTickBytes) / 1048576.0 / dt)
         }
         lastTickAt = now
@@ -1193,6 +1219,9 @@ class MainActivity : Activity() {
         }
         if (w != null && (w.active.get() > 0 || w.finished.get() > 0)) {
             lines.add("${w.lastClient.ifEmpty { "Browser" }}: ${w.active.get()} download chal rahe, ${w.finished.get()} poore, ${size(w.bytes.get())}")
+        }
+        if (w != null && (w.upActive.get() > 0 || w.uploaded.get() > 0)) {
+            lines.add("Browser se aayi: ${w.uploaded.get()} file, ${size(w.upBytes.get())}")
         }
         detailView.text = if (lines.isEmpty()) "Abhi koi juda nahi" else lines.joinToString("\n")
         val running = list.filter { !it.done }
@@ -1423,6 +1452,8 @@ class MainActivity : Activity() {
         transferring = false
         hosting = false
         hostLan = false
+        hostReceiveOnly = false
+        webSaved.clear()
         peers.clear()
         web = null
         progress = Progress()
