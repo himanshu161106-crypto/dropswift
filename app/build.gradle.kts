@@ -47,4 +47,7 @@ android {
 dependencies {
     // QR code: show + scan
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    // The scanner needs these at run time (camera permission handling).
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("androidx.core:core:1.13.1")
 }
