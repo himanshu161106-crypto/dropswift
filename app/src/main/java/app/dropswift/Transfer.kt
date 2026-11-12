@@ -12,6 +12,9 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
 import java.net.Socket
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 import java.util.concurrent.atomic.AtomicLong
 
 /** Live numbers the screen reads while a transfer runs. */
@@ -20,6 +23,9 @@ class Progress {
     @Volatile var total: Long = 0
     @Volatile var file: String = ""
     @Volatile var files: Int = 0
+    /** Time spent waiting on the Wi-Fi link and on phone storage, to see which one is the limit. */
+    val netNanos = AtomicLong(0)
+    val diskNanos = AtomicLong(0)
 }
 
 /**
@@ -35,6 +41,28 @@ object Transfer {
     const val SOCKET_BUFFER = 4 shl 20
 
     class Item(val uri: Uri, val name: String, val size: Long)
+
+    private class Chunk(val buf: ByteArray, var len: Int)
+
+    private const val QUEUE = 8
+    private val END = Chunk(ByteArray(0), 0)
+
+    private fun newPool(): ArrayBlockingQueue<Chunk> {
+        val pool = ArrayBlockingQueue<Chunk>(QUEUE + 2)
+        for (i in 0 until QUEUE + 2) pool.put(Chunk(ByteArray(BLOCK), 0))
+        return pool
+    }
+
+    /** Fills the buffer completely unless the file ends first. Returns bytes read (0 at end). */
+    private fun readFull(stream: java.io.InputStream, buf: ByteArray): Int {
+        var got = 0
+        while (got < buf.size) {
+            val n = stream.read(buf, got, buf.size - got)
+            if (n < 0) break
+            got += n
+        }
+        return got
+    }
 
     fun describe(ctx: Context, uris: List<Uri>): List<Item> {
         val out = ArrayList<Item>()
@@ -62,7 +90,7 @@ object Transfer {
         out.writeInt(MAGIC)
         out.writeInt(items.size)
         out.writeLong(p.total)
-        val buf = ByteArray(BLOCK)
+        val free = newPool()
         for (item in items) {
             p.file = item.name
             out.writeUTF(item.name)
@@ -70,14 +98,50 @@ object Transfer {
             val ins = ctx.contentResolver.openInputStream(item.uri)
                 ?: throw IOException("Cannot open ${item.name}")
             ins.use { stream ->
-                while (true) {
-                    val n = stream.read(buf)
-                    if (n < 0) break
-                    if (n == 0) continue
-                    out.writeInt(n)
-                    out.write(buf, 0, n)
-                    p.done.addAndGet(n.toLong())
+                // One thread reads the file while this thread pushes to Wi-Fi, so neither waits for the other.
+                val queue = ArrayBlockingQueue<Chunk>(QUEUE)
+                val error = AtomicReference<Throwable?>(null)
+                val reader = thread(name = "ds-read") {
+                    try {
+                        while (true) {
+                            val c = free.take()
+                            val t0 = System.nanoTime()
+                            val n = try {
+                                readFull(stream, c.buf)
+                            } catch (e: Throwable) {
+                                error.set(e)
+                                0
+                            }
+                            p.diskNanos.addAndGet(System.nanoTime() - t0)
+                            if (n <= 0) {
+                                free.put(c)
+                                queue.put(END)
+                                break
+                            }
+                            c.len = n
+                            queue.put(c)
+                        }
+                    } catch (_: InterruptedException) {
+                    }
                 }
+                try {
+                    while (true) {
+                        val c = queue.take()
+                        if (c === END) break
+                        val t0 = System.nanoTime()
+                        out.writeInt(c.len)
+                        out.write(c.buf, 0, c.len)
+                        p.netNanos.addAndGet(System.nanoTime() - t0)
+                        p.done.addAndGet(c.len.toLong())
+                        free.put(c)
+                    }
+                } finally {
+                    if (reader.isAlive) {
+                        reader.interrupt()
+                        reader.join(3000)
+                    }
+                }
+                error.get()?.let { throw IOException("Reading ${item.name}: ${it.message}") }
             }
             out.writeInt(0)
             p.files++
@@ -93,7 +157,7 @@ object Transfer {
         val count = inp.readInt()
         if (count < 0 || count > 100_000) throw IOException("Bad file count")
         p.total = inp.readLong()
-        val buf = ByteArray(BLOCK)
+        val free = newPool()
         for (i in 0 until count) {
             val name = cleanName(inp.readUTF())
             inp.readLong()
@@ -104,14 +168,54 @@ object Transfer {
                 val os = ctx.contentResolver.openOutputStream(uri)
                     ?: throw IOException("Cannot create $name")
                 os.use { stream ->
-                    while (true) {
-                        val n = inp.readInt()
-                        if (n == 0) break
-                        if (n < 0 || n > BLOCK) throw IOException("Bad data block")
-                        inp.readFully(buf, 0, n)
-                        stream.write(buf, 0, n)
-                        p.done.addAndGet(n.toLong())
+                    // One thread saves to storage while this thread keeps pulling from Wi-Fi.
+                    val queue = ArrayBlockingQueue<Chunk>(QUEUE)
+                    val error = AtomicReference<Throwable?>(null)
+                    val writer = thread(name = "ds-write") {
+                        try {
+                            while (true) {
+                                val c = queue.take()
+                                if (c === END) break
+                                if (error.get() == null) {
+                                    try {
+                                        val t0 = System.nanoTime()
+                                        stream.write(c.buf, 0, c.len)
+                                        p.diskNanos.addAndGet(System.nanoTime() - t0)
+                                    } catch (e: Throwable) {
+                                        error.set(e)
+                                    }
+                                }
+                                free.put(c)
+                            }
+                        } catch (_: InterruptedException) {
+                        }
                     }
+                    try {
+                        while (true) {
+                            error.get()?.let { throw IOException("Saving $name: ${it.message}") }
+                            val c = free.take()
+                            val t0 = System.nanoTime()
+                            val n = inp.readInt()
+                            if (n == 0) {
+                                free.put(c)
+                                break
+                            }
+                            if (n < 0 || n > BLOCK) throw IOException("Bad data block")
+                            inp.readFully(c.buf, 0, n)
+                            p.netNanos.addAndGet(System.nanoTime() - t0)
+                            c.len = n
+                            queue.put(c)
+                            p.done.addAndGet(n.toLong())
+                        }
+                        queue.put(END)
+                        writer.join()
+                    } finally {
+                        if (writer.isAlive) {
+                            writer.interrupt()
+                            writer.join(3000)
+                        }
+                    }
+                    error.get()?.let { throw IOException("Saving $name: ${it.message}") }
                 }
                 ok = true
             } finally {

@@ -69,6 +69,7 @@ class MainActivity : Activity() {
     @Volatile private var active = false
     @Volatile private var transferring = false
     private val openThings = ArrayList<Closeable>()
+    private var wifiLock: WifiManager.WifiLock? = null
 
     private var progress = Progress()
     private var startedAt = 0L
@@ -601,7 +602,18 @@ class MainActivity : Activity() {
                     f >= 4900 -> "5 GHz"
                     else -> "2.4 GHz (slow band)"
                 }
-                linkView.text = "Link: $band, $f MHz"
+                var line = "Link: $band, $f MHz"
+                try {
+                    val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                    val info = wifi.connectionInfo
+                    if (info != null && info.networkId != -1 && info.frequency > 0) {
+                        line += "\nRouter: ${info.frequency} MHz" +
+                            (if (info.frequency != f) " (different channel, this slows the transfer)" else "")
+                    }
+                } catch (_: Exception) {
+                }
+                linkView.text = line
+                log(line.replace("\n", " | "))
             } else if (tries < 20) {
                 ui.postDelayed({ showLinkBand(gen, tries + 1) }, 700)
             }
@@ -610,6 +622,14 @@ class MainActivity : Activity() {
 
     private fun onTransferStarted(word: String) {
         transferring = true
+        try {
+            val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val lock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "dropswift")
+            lock.setReferenceCounted(false)
+            lock.acquire()
+            wifiLock = lock
+        } catch (_: Exception) {
+        }
         qrView.visibility = View.GONE
         bar.visibility = View.VISIBLE
         bar.progress = 0
@@ -655,6 +675,10 @@ class MainActivity : Activity() {
                 progress.files, size(done), secs, okWord
             )
             setStatus("Done")
+            log(String.format(
+                Locale.US, "result: %.1f MB/s avg, %s in %.1f s | waited on Wi-Fi %.1f s, on storage %.1f s",
+                avg, size(done), secs, progress.netNanos.get() / 1e9, progress.diskNanos.get() / 1e9
+            ))
         } else {
             setStatus(failNote)
         }
@@ -667,6 +691,11 @@ class MainActivity : Activity() {
         generation++
         active = false
         transferring = false
+        try {
+            wifiLock?.release()
+        } catch (_: Exception) {
+        }
+        wifiLock = null
         closeAll()
         leaveGroup { }
         qrView.visibility = View.GONE
