@@ -31,6 +31,9 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.integration.android.IntentIntegrator
 import com.journeyapps.barcodescanner.BarcodeEncoder
 import java.io.Closeable
+import java.io.File
+import java.io.PrintWriter
+import java.io.StringWriter
 import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -48,6 +51,8 @@ class MainActivity : Activity() {
     private lateinit var detailView: TextView
     private lateinit var speedView: TextView
     private lateinit var linkView: TextView
+    private lateinit var logView: TextView
+    private val logLines = ArrayList<String>()
     private lateinit var qrView: ImageView
     private lateinit var bar: ProgressBar
     private lateinit var btnSend: Button
@@ -75,13 +80,51 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        installCrashCatcher()
         buildScreen()
+        showLastCrash()
         p2p = getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
         channel = p2p?.initialize(this, mainLooper, null)
         if (p2p == null || channel == null) {
             setStatus("This phone does not support Wi-Fi Direct")
             btnSend.isEnabled = false
             btnReceive.isEnabled = false
+        }
+    }
+
+    /** If the app dies, keep the reason in a small file and show it on the next start. */
+    private fun installCrashCatcher() {
+        val file = File(filesDir, "last_crash.txt")
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            try {
+                val sw = StringWriter()
+                e.printStackTrace(PrintWriter(sw))
+                file.writeText("CRASH in ${t.name}\n" + sw.toString().take(6000))
+            } catch (_: Throwable) {
+            }
+            previous?.uncaughtException(t, e)
+        }
+    }
+
+    private fun showLastCrash() {
+        try {
+            val file = File(filesDir, "last_crash.txt")
+            if (file.exists()) {
+                val textOfCrash = file.readText()
+                file.delete()
+                setStatus("App closed last time. Send a screenshot of the text below")
+                log(textOfCrash)
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun log(line: String) {
+        ui.post {
+            logLines.add(line)
+            while (logLines.size > 40) logLines.removeAt(0)
+            logView.text = logLines.joinToString("\n")
         }
     }
 
@@ -176,6 +219,15 @@ class MainActivity : Activity() {
         btnCancel.setOnClickListener { stopEverything("Cancelled") }
         root.addView(btnCancel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)))
 
+        root.addView(gap(18))
+        logView = TextView(this)
+        logView.textSize = 11f
+        logView.setTextColor(Color.parseColor("#71829B"))
+        logView.setTextIsSelectable(true)
+        root.addView(logView, wide)
+        log("DropSwift build " + (try { packageManager.getPackageInfo(packageName, 0).versionName } catch (e: Exception) { "?" })
+            + ", Android " + Build.VERSION.RELEASE + ", " + Build.MANUFACTURER + " " + Build.MODEL)
+
         val scroll = ScrollView(this)
         scroll.setBackgroundColor(Color.parseColor("#0B0F19"))
         scroll.isFillViewport = true
@@ -185,6 +237,7 @@ class MainActivity : Activity() {
 
     private fun setStatus(s: String) {
         ui.post { statusView.text = s }
+        log("> $s")
     }
 
     private fun setBusy(busy: Boolean) {
@@ -230,16 +283,25 @@ class MainActivity : Activity() {
     }
 
     private fun pickFiles() {
+        log("opening file picker")
         val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
         i.addCategory(Intent.CATEGORY_OPENABLE)
         i.type = "*/*"
         i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
-        startActivityForResult(i, REQ_PICK)
+        try {
+            startActivityForResult(i, REQ_PICK)
+        } catch (e: Exception) {
+            setStatus("Could not open file picker: ${e.message}")
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        log("back from screen $requestCode, result $resultCode")
         if (requestCode == REQ_PICK) {
-            if (resultCode != RESULT_OK || data == null) return
+            if (resultCode != RESULT_OK || data == null) {
+                setStatus("No file chosen")
+                return
+            }
             val list = ArrayList<Uri>()
             val clip = data.clipData
             if (clip != null) {
@@ -255,13 +317,19 @@ class MainActivity : Activity() {
             scan.setPrompt("Scan the QR code on the receiving phone")
             scan.setBeepEnabled(false)
             scan.setOrientationLocked(true)
-            scan.initiateScan()
+            try {
+                scan.initiateScan()
+                log("scanner opened")
+            } catch (e: Exception) {
+                setStatus("Could not open scanner: ${e.message}")
+            }
             return
         }
         val result = IntentIntegrator.parseActivityResult(requestCode, resultCode, data)
         if (result != null) {
             val contents = result.contents
-            if (contents == null) setStatus("Scan cancelled") else startSending(contents)
+            if (contents == null) setStatus("Scan closed without reading a QR. Point the camera at the QR on the receiving phone")
+            else startSending(contents)
             return
         }
         super.onActivityResult(requestCode, resultCode, data)
@@ -300,11 +368,13 @@ class MainActivity : Activity() {
         m.createGroup(c, cfg, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
                 if (gen != generation) return
+                log("direct link created, band request $band")
                 onGroupReady(gen, ssid, pass)
             }
 
             override fun onFailure(reason: Int) {
                 if (gen != generation) return
+                log("create link failed, band request $band, code $reason")
                 if (band == WifiP2pConfig.GROUP_OWNER_BAND_5GHZ) {
                     // Some phones refuse a forced 5 GHz link; let the phone choose.
                     ui.postDelayed({
@@ -383,6 +453,7 @@ class MainActivity : Activity() {
             m.connect(c, cfg, object : WifiP2pManager.ActionListener {
                 override fun onSuccess() {
                     if (gen != generation) return
+                    log("join request accepted, waiting for link")
                     waitForOwner(gen, SystemClock.elapsedRealtime() + 40_000) { owner ->
                         if (gen != generation) return@waitForOwner
                         if (owner == null) {
