@@ -934,24 +934,29 @@ class MainActivity : Activity() {
                 hostItems = items
                 val ssid = "DIRECT-DS-" + randomText(5)
                 val pass = randomText(12)
+                val routerFreq = routerFrequency()
+                // On the router's own 5 GHz channel the Wi-Fi chip does not have to keep hopping
+                // between two channels, which can halve the speed.
+                val sameChannel = band == WifiP2pConfig.GROUP_OWNER_BAND_5GHZ && routerFreq in 5000..5899
+                if (sameChannel) log("phone is on a router at $routerFreq MHz, making the link on the same channel")
                 leaveGroup {
-                    if (gen == generation) createGroup(gen, ssid, pass, band)
+                    if (gen == generation) createGroup(gen, ssid, pass, band, if (sameChannel) routerFreq else 0)
                 }
             }
         }
     }
 
     @SuppressLint("MissingPermission")
-    private fun createGroup(gen: Int, ssid: String, pass: String, band: Int) {
+    private fun createGroup(gen: Int, ssid: String, pass: String, band: Int, freq: Int = 0) {
         val m = p2p
         val c = channel
         if (m == null || c == null) return
-        val cfg = WifiP2pConfig.Builder()
+        val b = WifiP2pConfig.Builder()
             .setNetworkName(ssid)
             .setPassphrase(pass)
-            .setGroupOperatingBand(band)
             .enablePersistentMode(false)
-            .build()
+        if (freq > 0) b.setGroupOperatingFrequency(freq) else b.setGroupOperatingBand(band)
+        val cfg = b.build()
         m.createGroup(c, cfg, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
                 if (gen != generation) return
@@ -961,8 +966,11 @@ class MainActivity : Activity() {
 
             override fun onFailure(reason: Int) {
                 if (gen != generation) return
-                log("create link failed, band request $band, code $reason")
-                if (band != WifiP2pConfig.GROUP_OWNER_BAND_AUTO) {
+                log("create link failed, band request $band, freq request $freq, code $reason")
+                if (freq > 0) {
+                    // Channel not allowed for a link on this phone; fall back to just the band.
+                    ui.postDelayed({ if (gen == generation) createGroup(gen, ssid, pass, band) }, 400)
+                } else if (band != WifiP2pConfig.GROUP_OWNER_BAND_AUTO) {
                     // Some phones refuse a forced band; let the phone choose.
                     ui.postDelayed({
                         if (gen == generation) createGroup(gen, ssid, pass, WifiP2pConfig.GROUP_OWNER_BAND_AUTO)
@@ -1030,10 +1038,11 @@ class MainActivity : Activity() {
         }
         peer.done = true
         val secs = (SystemClock.elapsedRealtime() - t0) / 1000.0
-        val avg = if (secs > 0) peer.p.done.get() / 1048576.0 / secs else 0.0
+        val dataSecs = peer.p.dataNanos / 1e9
+        val avg = if (dataSecs > 0) peer.p.done.get() / 1048576.0 / dataSecs else 0.0
         log(String.format(
-            Locale.US, "result %s: %s | %.1f MB/s avg, %s in %.1f s | per connection: waited on Wi-Fi %.1f s, on storage %.1f s",
-            name, if (peer.ok) "ok" else "failed", avg, size(peer.p.done.get()), secs,
+            Locale.US, "result %s: %s | %.1f MB/s while sending, %s in %.1f s (%.1f s total with receiver's check) | per connection: waited on Wi-Fi %.1f s, on storage %.1f s",
+            name, if (peer.ok) "ok" else "failed", avg, size(peer.p.done.get()), dataSecs, secs,
             peer.p.netNanos.get() / 1e9 / peer.p.streams, peer.p.diskNanos.get() / 1e9 / peer.p.streams
         ))
         ui.post { if (gen == generation) onPeerFinished() }
@@ -1353,7 +1362,7 @@ class MainActivity : Activity() {
                     val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
                     val info = wifi.connectionInfo
                     log("router check: networkId ${info?.networkId}, freq ${info?.frequency}, speed ${info?.linkSpeed} Mbps")
-                    if (info != null && info.networkId != -1 && info.frequency > 0 && info.frequency != f) {
+                    if (info != null && info.frequency > 0 && info.frequency != f) {
                         line += "\nRouter: ${info.frequency} MHz"
                         showTip("Swifty ki salah: phone router se bhi juda hai aur woh alag channel pe hai, isse speed aadhi ho sakti hai. Router se disconnect karke bhejo.")
                     }
@@ -1364,6 +1373,17 @@ class MainActivity : Activity() {
             } else if (tries < 20) {
                 ui.postDelayed({ showLinkBand(gen, tries + 1) }, 700)
             }
+        }
+    }
+
+    /** Frequency of the router this phone is connected to, or 0 if none. */
+    private fun routerFrequency(): Int {
+        return try {
+            val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val f = wifi.connectionInfo?.frequency ?: 0
+            if (f > 0) f else 0
+        } catch (_: Throwable) {
+            0
         }
     }
 

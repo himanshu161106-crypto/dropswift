@@ -43,6 +43,8 @@ class Progress {
     /** Time spent waiting on the Wi-Fi link and on phone storage (summed over all connections). */
     val netNanos = AtomicLong(0)
     val diskNanos = AtomicLong(0)
+    /** How long the data itself took to move, without the receiver's checking time. */
+    @Volatile var dataNanos: Long = 0
     /** Files saved on this phone in this transfer: name and where it is. */
     val saved: MutableList<Pair<String, Uri>> = java.util.Collections.synchronizedList(ArrayList())
 }
@@ -342,8 +344,10 @@ object Transfer {
             workers.add(reader)
             workers.addAll(senders)
         }
+        val started = System.nanoTime()
         for (w in workers) w.start()
         for (w in workers) w.join()
+        p.dataNanos = System.nanoTime() - started
         error.get()?.let { throw IOException(it.message ?: it.javaClass.simpleName) }
 
         // The receiver checks every file before answering; big files take a while to check.
