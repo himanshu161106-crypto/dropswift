@@ -342,7 +342,15 @@ class MainActivity : Activity() {
 
     private fun proceed() {
         if (pendingAction != ACTION_SEND) {
-            startReceiving()
+            AlertDialog.Builder(this)
+                .setTitle("How far is the other phone?")
+                .setItems(arrayOf("Near - fastest (5 GHz)", "Far - long range but slow (2.4 GHz)")) { _, which ->
+                    startReceiving(
+                        if (which == 0) WifiP2pConfig.GROUP_OWNER_BAND_5GHZ
+                        else WifiP2pConfig.GROUP_OWNER_BAND_2GHZ
+                    )
+                }
+                .show()
             return
         }
         AlertDialog.Builder(this)
@@ -428,7 +436,7 @@ class MainActivity : Activity() {
 
     // -------------------------------------------------------------- receiver
 
-    private fun startReceiving() {
+    private fun startReceiving(band: Int) {
         val gen = beginSession()
         setStatus("Creating direct link...")
         val rnd = SecureRandom()
@@ -441,7 +449,7 @@ class MainActivity : Activity() {
         val ssid = "DIRECT-DS-" + rand(5)
         val pass = rand(12)
         leaveGroup {
-            if (gen == generation) createGroup(gen, ssid, pass, WifiP2pConfig.GROUP_OWNER_BAND_5GHZ)
+            if (gen == generation) createGroup(gen, ssid, pass, band)
         }
     }
 
@@ -466,8 +474,8 @@ class MainActivity : Activity() {
             override fun onFailure(reason: Int) {
                 if (gen != generation) return
                 log("create link failed, band request $band, code $reason")
-                if (band == WifiP2pConfig.GROUP_OWNER_BAND_5GHZ) {
-                    // Some phones refuse a forced 5 GHz link; let the phone choose.
+                if (band != WifiP2pConfig.GROUP_OWNER_BAND_AUTO) {
+                    // Some phones refuse a forced band; let the phone choose.
                     ui.postDelayed({
                         if (gen == generation) createGroup(gen, ssid, pass, WifiP2pConfig.GROUP_OWNER_BAND_AUTO)
                     }, 400)
