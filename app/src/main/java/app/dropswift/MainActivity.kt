@@ -411,11 +411,9 @@ class MainActivity : Activity() {
                 server.reuseAddress = true
                 server.receiveBufferSize = Transfer.SOCKET_BUFFER
                 server.bind(InetSocketAddress(Transfer.PORT))
-                val socket = server.accept()
-                track(socket)
-                if (gen != generation) return@thread
-                ui.post { if (gen == generation) onTransferStarted("Receiving") }
-                Transfer.receive(this, socket, progress)
+                Transfer.receive(this, server, progress, { c -> track(c) }) {
+                    ui.post { if (gen == generation) onTransferStarted("Receiving") }
+                }
                 ok = true
             } catch (e: Exception) {
                 note = "Receive failed: ${e.message ?: e.javaClass.simpleName}"
@@ -522,8 +520,18 @@ class MainActivity : Activity() {
                 }
                 val s = socket ?: throw IOException("receiver not reachable (${last?.message})")
                 track(s)
+                val sockets = ArrayList<Socket>()
+                sockets.add(s)
+                // Extra connections so several blocks travel at the same time.
+                for (extra in 1 until Transfer.STREAMS) {
+                    val more = Socket()
+                    track(more)
+                    more.sendBufferSize = Transfer.SOCKET_BUFFER
+                    more.connect(InetSocketAddress(owner, port), 5000)
+                    sockets.add(more)
+                }
                 ui.post { if (gen == generation) onTransferStarted("Sending") }
-                Transfer.send(this, s, items, progress)
+                Transfer.send(this, sockets, items, progress)
                 ok = true
             } catch (e: Exception) {
                 note = "Send failed: ${e.message ?: e.javaClass.simpleName}"
@@ -672,12 +680,13 @@ class MainActivity : Activity() {
             speedView.text = String.format(Locale.US, "%.1f MB/s", avg)
             detailView.text = String.format(
                 Locale.US, "%d file(s), %s in %.1f s (average speed above)\n%s",
-                progress.files, size(done), secs, okWord
+                progress.files.get(), size(done), secs, okWord
             )
             setStatus("Done")
             log(String.format(
-                Locale.US, "result: %.1f MB/s avg, %s in %.1f s | waited on Wi-Fi %.1f s, on storage %.1f s",
-                avg, size(done), secs, progress.netNanos.get() / 1e9, progress.diskNanos.get() / 1e9
+                Locale.US, "result: %.1f MB/s avg, %s in %.1f s | %d connections | per connection: waited on Wi-Fi %.1f s, on storage %.1f s",
+                avg, size(done), secs, progress.streams,
+                progress.netNanos.get() / 1e9 / progress.streams, progress.diskNanos.get() / 1e9 / progress.streams
             ))
         } else {
             setStatus(failNote)
