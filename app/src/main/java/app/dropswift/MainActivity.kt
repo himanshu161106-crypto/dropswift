@@ -46,7 +46,6 @@ import com.journeyapps.barcodescanner.BarcodeEncoder
 import java.io.Closeable
 import java.io.EOFException
 import java.io.File
-import java.io.IOException
 import java.io.PrintWriter
 import java.io.StringWriter
 import java.net.InetAddress
@@ -54,6 +53,7 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.security.SecureRandom
+import java.util.Collections
 import java.util.Locale
 import kotlin.concurrent.thread
 
@@ -61,7 +61,7 @@ class MainActivity : Activity() {
 
     private val ui = Handler(Looper.getMainLooper())
 
-    private lateinit var statusView: TextView   // the bot's speech bubble
+    private lateinit var statusView: TextView   // Swifty's speech bubble
     private lateinit var botView: ImageView
     private lateinit var tipView: TextView
     private lateinit var detailView: TextView
@@ -70,10 +70,11 @@ class MainActivity : Activity() {
     private lateinit var logView: TextView
     private lateinit var logToggle: TextView
     private lateinit var receivedBox: LinearLayout
-    private lateinit var searchInput: EditText
+    private lateinit var askInput: EditText
     private lateinit var searchBox: LinearLayout
     private lateinit var btnSendSelected: Button
     private lateinit var qrView: ImageView
+    private lateinit var altView: TextView
     private lateinit var bar: ProgressBar
     private lateinit var btnSend: Button
     private lateinit var btnReceive: Button
@@ -99,6 +100,22 @@ class MainActivity : Activity() {
     private var lastTickAt = 0L
     private var lastTickBytes = 0L
 
+    // Sender ("host") state: one link, many receivers.
+    private class Peer(val name: String) {
+        val p = Progress()
+        @Volatile var status = "jud gaya"
+        @Volatile var done = false
+        @Volatile var ok = false
+    }
+
+    private val peers: MutableList<Peer> = Collections.synchronizedList(ArrayList())
+    @Volatile private var hosting = false
+    private var hostItems: List<Transfer.Item> = emptyList()
+    private var hostSsid = ""
+    private var hostPass = ""
+    private var showingUrlQr = false
+    private var web: WebShare? = null
+
     private class Found(val uri: Uri, val name: String, val size: Long, val folder: String)
 
     // ---------------------------------------------------------------- screen
@@ -111,7 +128,7 @@ class MainActivity : Activity() {
         p2p = getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
         channel = p2p?.initialize(this, mainLooper, null)
         if (!showLastCrash()) {
-            say("Namaste! Main Swifty hoon. File bhejni hai ya leni hai? Neeche button dabao. Ya file ka naam likh do, main dhoond ke de dunga.")
+            say("Namaste! Main Swifty hoon. File bhejni hai ya leni hai? Button dabao, ya neeche mujhse likh ke bolo, jaise \"video bhejo\" ya \"file leni hai\".")
         }
     }
 
@@ -149,7 +166,7 @@ class MainActivity : Activity() {
     private fun log(line: String) {
         ui.post {
             logLines.add(line)
-            while (logLines.size > 60) logLines.removeAt(0)
+            while (logLines.size > 80) logLines.removeAt(0)
             logView.text = logLines.joinToString("\n")
         }
     }
@@ -246,34 +263,34 @@ class MainActivity : Activity() {
         root.addView(btnReceive, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58)))
         root.addView(gap(14))
 
-        // Find a file by name
-        val searchRow = LinearLayout(this)
-        searchRow.orientation = LinearLayout.HORIZONTAL
-        searchRow.gravity = Gravity.CENTER_VERTICAL
-        searchInput = EditText(this)
-        searchInput.hint = "File ka naam likho..."
-        searchInput.setHintTextColor(Color.parseColor("#71829B"))
-        searchInput.setTextColor(Color.WHITE)
-        searchInput.textSize = 15f
-        searchInput.setSingleLine(true)
-        searchInput.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-        searchInput.imeOptions = EditorInfo.IME_ACTION_SEARCH
-        searchInput.background = rounded(Color.parseColor("#151C2E"), 12)
-        searchInput.setPadding(dp(14), dp(12), dp(14), dp(12))
-        searchInput.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == EditorInfo.IME_ACTION_SEARCH) {
-                onSearchClicked()
+        // Talk to Swifty / find a file by name
+        val askRow = LinearLayout(this)
+        askRow.orientation = LinearLayout.HORIZONTAL
+        askRow.gravity = Gravity.CENTER_VERTICAL
+        askInput = EditText(this)
+        askInput.hint = "Swifty se bolo, ya file ka naam..."
+        askInput.setHintTextColor(Color.parseColor("#71829B"))
+        askInput.setTextColor(Color.WHITE)
+        askInput.textSize = 15f
+        askInput.setSingleLine(true)
+        askInput.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        askInput.imeOptions = EditorInfo.IME_ACTION_SEND
+        askInput.background = rounded(Color.parseColor("#151C2E"), 12)
+        askInput.setPadding(dp(14), dp(12), dp(14), dp(12))
+        askInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_SEND) {
+                onAsk()
                 true
             } else false
         }
-        searchRow.addView(searchInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        val btnSearch = button("Dhoondo", Color.parseColor("#06B6D4"), Color.parseColor("#04130C"))
-        btnSearch.textSize = 15f
-        btnSearch.setOnClickListener { onSearchClicked() }
-        val searchBtnParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48))
-        searchBtnParams.leftMargin = dp(8)
-        searchRow.addView(btnSearch, searchBtnParams)
-        root.addView(searchRow, wide)
+        askRow.addView(askInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        val btnAsk = button("Bolo", Color.parseColor("#06B6D4"), Color.parseColor("#04130C"))
+        btnAsk.textSize = 15f
+        btnAsk.setOnClickListener { onAsk() }
+        val askBtnParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48))
+        askBtnParams.leftMargin = dp(8)
+        askRow.addView(btnAsk, askBtnParams)
+        root.addView(askRow, wide)
 
         searchBox = LinearLayout(this)
         searchBox.orientation = LinearLayout.VERTICAL
@@ -302,6 +319,12 @@ class MainActivity : Activity() {
         qrView.setPadding(dp(10), dp(10), dp(10), dp(10))
         root.addView(qrView, LinearLayout.LayoutParams(dp(260), dp(260)))
 
+        altView = text(14f, Color.parseColor("#06B6D4"), true)
+        altView.visibility = View.GONE
+        altView.setPadding(dp(8), dp(10), dp(8), dp(10))
+        altView.setOnClickListener { toggleBrowserQr() }
+        root.addView(altView, wide)
+
         bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
         bar.max = 1000
         bar.visibility = View.GONE
@@ -318,7 +341,7 @@ class MainActivity : Activity() {
 
         btnCancel = button("Cancel", Color.parseColor("#48232D"), Color.parseColor("#FFDCE0"))
         btnCancel.visibility = View.GONE
-        btnCancel.setOnClickListener { stopEverything("Theek hai, rok diya.") }
+        btnCancel.setOnClickListener { stopEverything(if (hosting) "Band kar diya." else "Theek hai, rok diya.") }
         root.addView(btnCancel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)))
 
         receivedBox = LinearLayout(this)
@@ -369,11 +392,13 @@ class MainActivity : Activity() {
         val m = raw.lowercase(Locale.US)
         return when {
             m.contains("cancel") -> "Theek hai, rok diya."
+            m.contains("integrity failed") ->
+                netFault("file raste mein kharab ho gayi (SHA-256 match nahi hua), isliye maine use hata diya. Dobara bhejo.")
             m.contains("not confirmed") ->
-                netFault("saara data bhej diya, par aakhri second mein link toot gaya, isliye doosre phone se 'mil gaya' ki khabar nahi aayi. Doosre phone pe Download/DropSwift check karo, file aksar pahunch chuki hoti hai.")
+                netFault("saara data bhej diya, par aakhri second mein link toot gaya, isliye doosre phone se 'mil gaya' ki khabar nahi aayi. Doosre phone pe Download/DropSwift check karo.")
             m.contains("enospc") || m.contains("no space") ->
                 phoneFault("phone ka storage bhar gaya. Thodi jagah khaali karke dobara lo.")
-            m.contains("different dropswift version") ->
+            m.contains("different dropswift version") || m.contains("old or foreign") ->
                 appFault("dono phone pe alag-alag version hai. Dono pe naya DropSwift install karo.")
             m.contains("could not make a direct link") ->
                 netFault("dono ke internet seedha link nahi banne de rahe. Aksar mobile data pe hota hai. Ek phone ko Wi-Fi pe laake dobara try karo.")
@@ -382,15 +407,16 @@ class MainActivity : Activity() {
             m.contains("did not join in time") ->
                 "Doosra phone juda hi nahi. Code sahi daala tha? Dobara try karo."
             m.contains("not reachable") ->
-                netFault("doosre phone tak pahunch nahi paya. Dono phone paas laao aur dobara try karo.")
+                netFault("bhejne wale phone tak pahunch nahi paya. Dono phone paas laao, bhejne wale pe QR khula rakho, phir dobara scan karo.")
+            m.contains("address already in use") || m.contains("eaddrinuse") ->
+                appFault("pichla transfer abhi poori tarah band nahi hua. 5 second ruk ke dobara try karo.")
             e is EOFException || m.contains("reset") || m.contains("broken pipe") || m.contains("timed out") ||
                 m.contains("abort") || m.contains("socket closed") || m.contains("link closed") ||
-                m.contains("link went silent") || m.contains("did not arrive completely") ||
-                m.contains("did not confirm") || m.contains("eof") ->
+                m.contains("link went silent") || m.contains("did not arrive completely") || m.contains("did not confirm") || m.contains("eof") ->
                 netFault("beech mein link toot gaya. Phone door ho gaye, ya doosre phone pe app band ho gaya. Paas aake dobara bhejo.")
             e is SecurityException || m.contains("permission") || m.contains("cannot open") ->
                 phoneFault("is file ko padhne ki ijazat nahi mili. File dobara chun ke bhejo.")
-            m.contains("cannot create") ->
+            m.contains("cannot create") || m.contains("cannot re-open") ->
                 phoneFault("file save nahi ho payi. Storage mein jagah aur permission check karo.")
             else -> appFault("kuch gadbad hui ($raw). Yeh app ki galti lag rahi hai. 'Show details' ka text app banane wale ko bhej do.")
         }
@@ -422,6 +448,69 @@ class MainActivity : Activity() {
             }
         }
         return if (tips.isEmpty()) null else "Swifty ki salah: " + tips.joinToString(" ")
+    }
+
+    /** Understands short Hindi/Hinglish/English requests typed to Swifty. Works offline. */
+    private fun onAsk() {
+        val raw = askInput.text.toString().trim()
+        try {
+            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            imm.hideSoftInputFromWindow(askInput.windowToken, 0)
+        } catch (_: Throwable) {
+        }
+        if (raw.isEmpty()) {
+            say("Kuch likho, jaise \"video bhejo\", \"file leni hai\", \"door bhejna hai\", ya kisi file ka naam.")
+            return
+        }
+        log("you: $raw")
+        val t = " " + raw.lowercase(Locale.US).replace(Regex("[^a-z0-9\\u0900-\\u097f ]"), " ") + " "
+        fun has(vararg words: String) = words.any { t.contains(" $it") }
+
+        val wantsHelp = has("help", "madad", "kaise", "kese", "kya kar", "samjha", "how")
+        val wantsSpeed = has("speed", "slow", "dheem", "dhim", "tez", "fast")
+        val wantsFar = has("door", "dur ", "internet", "online", "far")
+        val wantsApple = has("iphone", "ipad", "laptop", "computer", "pc ", "mac ", "windows")
+        val wantsWhere = has("kahan", "kaha ", "where", "folder") && has("file", "save", "gayi", "gaya", "aayi")
+        val wantsReceive = has("receive", "lena", "leni", "le lo", "lelo", "mangw", "aa rahi", "aane", "lunga", "lungi")
+        val wantsSend = has("bhej", "send", "share", "de do", "dedo", "dena", "transfer")
+
+        when {
+            active -> say("Abhi ek kaam chal raha hai. Khatam hone do, ya Cancel/Band karo dabao.")
+            wantsWhere -> say("Aayi hui files phone ke Download/DropSwift folder mein hoti hain. Ho jaane ke baad list mein naam pe dabao toh seedha khul jayegi.")
+            wantsApple -> say("iPhone ya laptop pe app nahi chahiye. Is phone pe Send files dabao, file chuno, 'Paas mein' chuno. Phir QR ke neeche 'iPhone ya laptop' dabao, main steps bataunga.")
+            wantsSpeed -> say("Speed ke liye: 1) dono phone paas rakho, 2) dono ko ghar ke Wi-Fi router se disconnect karo, 3) battery saver band karo, 4) jo phone tez hai usse bhejo. Ek saath 3 phone lenge toh speed teeno mein bantegi.")
+            wantsHelp && !wantsSend && !wantsReceive -> say("Bhejne ke liye: Send files dabao, file chuno, QR dikhega. Lene wala: Receive files dabake woh QR scan kare, file aa jayegi. Ek QR ko 3 ya zyada phone scan kar sakte hain.")
+            wantsReceive && !wantsSend -> {
+                if (wantsFar) {
+                    say("Theek hai, internet se lete hain.")
+                    startInternetReceive()
+                } else {
+                    say("Theek hai! Bhejne wale phone ka QR scan karo.")
+                    ensureNearby { openScanner() }
+                }
+            }
+            wantsSend -> {
+                val name = fileWords(t)
+                if (name.length >= 2) {
+                    findFiles(name)
+                } else {
+                    onSendClicked()
+                }
+            }
+            else -> findFiles(raw)
+        }
+    }
+
+    /** Drops the command words so only the file name is left, e.g. "shaadi wali video bhejo" -> "shaadi". */
+    private fun fileWords(t: String): String {
+        val skip = setOf(
+            "bhej", "bhejo", "bhejna", "bhejni", "bhejdo", "send", "share", "karo", "kar", "do", "de", "dedo", "dena",
+            "file", "files", "wali", "wala", "wale", "ko", "ki", "ka", "ke", "mujhe", "muje", "hai", "he", "please", "plz",
+            "yeh", "ye", "woh", "wo", "mera", "meri", "mere", "transfer", "is", "us", "abhi", "jaldi", "the", "a", "my",
+            "video", "videos", "photo", "photos", "pic", "pics", "image", "song", "gaana", "gana", "pdf", "apk", "doc", "naam"
+        )
+        val kept = t.trim().split(Regex("\\s+")).filter { it.isNotEmpty() && it !in skip }
+        return kept.joinToString(" ").trim()
     }
 
     private fun showLog(show: Boolean) {
@@ -476,25 +565,20 @@ class MainActivity : Activity() {
         btnSend.alpha = if (busy) 0.4f else 1f
         btnReceive.alpha = if (busy) 0.4f else 1f
         btnCancel.visibility = if (busy) View.VISIBLE else View.GONE
+        btnCancel.text = "Cancel"
     }
 
     // --------------------------------------------------- find a file by name
 
-    private fun onSearchClicked() {
+    private fun findFiles(q: String) {
         if (active) return
-        val q = searchInput.text.toString().trim()
-        try {
-            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-            imm.hideSoftInputFromWindow(searchInput.windowToken, 0)
-        } catch (_: Throwable) {
-        }
         if (q.length < 2) {
-            say("File ke naam ke kam se kam 2 akshar likho, phir Dhoondo dabao.")
+            say("File ke naam ke kam se kam 2 akshar likho.")
             return
         }
         if (Build.VERSION.SDK_INT >= 30) {
             if (!Environment.isExternalStorageManager()) {
-                say("File dhoondne ke liye mujhe phone ki files dekhne ki ijazat chahiye. Agli screen pe 'Allow access to all files' on karo, wapas aao, aur Dhoondo dobara dabao.")
+                say("File dhoondne ke liye mujhe phone ki files dekhne ki ijazat chahiye. Agli screen pe 'Allow access to all files' on karo, wapas aao, aur dobara bolo.")
                 try {
                     startActivity(
                         Intent(
@@ -526,11 +610,15 @@ class MainActivity : Activity() {
             var error: Throwable? = null
             try {
                 val base = MediaStore.Files.getContentUri("external")
+                // Every word must appear in the name, in any order.
+                val words = q.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }.take(5)
+                val where = words.joinToString(" AND ") { "_display_name LIKE ?" } + " AND _size > 0"
+                val args = words.map { "%$it%" }.toTypedArray()
                 contentResolver.query(
                     base,
                     arrayOf("_id", "_display_name", "_size", "relative_path"),
-                    "_display_name LIKE ? AND _size > 0",
-                    arrayOf("%$q%"),
+                    where,
+                    args,
                     "date_modified DESC"
                 )?.use { c ->
                     while (c.moveToNext() && found.size < 60) {
@@ -614,29 +702,29 @@ class MainActivity : Activity() {
         if (active) return
         AlertDialog.Builder(this)
             .setTitle("Bhejne wala phone kahan hai?")
-            .setItems(
-                arrayOf(
-                    "Paas mein - sabse tez (5 GHz)",
-                    "Thoda door, 20 m tak - dheema (2.4 GHz)",
-                    "Bahut door - internet se"
-                )
-            ) { _, which ->
-                when (which) {
-                    0 -> ensureNearby { startReceiving(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ) }
-                    1 -> ensureNearby { startReceiving(WifiP2pConfig.GROUP_OWNER_BAND_2GHZ) }
-                    else -> startInternetReceive()
-                }
+            .setItems(arrayOf("Paas mein - uska QR scan karo", "Bahut door - internet code se")) { _, which ->
+                if (which == 0) ensureNearby { openScanner() } else startInternetReceive()
             }
             .show()
     }
 
-    /** After files are chosen: nearby (QR) or far away (internet code). */
+    /** After files are chosen: show a QR nearby, or use an internet code. */
     private fun chooseSendWay() {
         if (active || pickedUris.isEmpty()) return
         AlertDialog.Builder(this)
-            .setTitle("Lene wala phone kahan hai?")
-            .setItems(arrayOf("Paas mein - QR scan karo (sabse tez)", "Door hai - internet se, code daalo")) { _, which ->
-                if (which == 0) ensureNearby { openScanner() } else askCode()
+            .setTitle("Lene wale kahan hain?")
+            .setItems(
+                arrayOf(
+                    "Paas mein - QR dikhao (sabse tez, kai phone ek saath)",
+                    "20 m tak - QR dikhao (dheema, door tak)",
+                    "Bahut door - internet code se"
+                )
+            ) { _, which ->
+                when (which) {
+                    0 -> ensureNearby { startHosting(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ) }
+                    1 -> ensureNearby { startHosting(WifiP2pConfig.GROUP_OWNER_BAND_2GHZ) }
+                    else -> askCode()
+                }
             }
             .show()
     }
@@ -709,10 +797,9 @@ class MainActivity : Activity() {
     }
 
     private fun openScanner() {
-        say("${pickedUris.size} file chuni. Ab lene wale phone ka QR scan karo.")
         val scan = IntentIntegrator(this)
         scan.setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
-        scan.setPrompt("Lene wale phone ka QR scan karo")
+        scan.setPrompt("Bhejne wale phone ka QR scan karo")
         scan.setBeepEnabled(false)
         scan.setOrientationLocked(true)
         try {
@@ -728,13 +815,13 @@ class MainActivity : Activity() {
         input.hint = "jaise: abcd efgh"
         input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         input.setSingleLine(true)
-        val pad = dp(20)
         val holder = LinearLayout(this)
-        holder.setPadding(pad, dp(8), pad, 0)
+        holder.setPadding(dp(20), dp(8), dp(20), 0)
         holder.addView(
             input,
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         )
+        say("Lene wale phone pe: Receive files → 'Bahut door - internet code se'. Jo code aaye woh yahan daalo.")
         AlertDialog.Builder(this)
             .setTitle("Lene wale phone ka code daalo")
             .setView(holder)
@@ -763,15 +850,15 @@ class MainActivity : Activity() {
             }
             if (list.isEmpty()) return
             pickedUris = list
-            say("${list.size} file chuni. Ab batao lene wala phone kahan hai.")
+            say("${list.size} file chuni. Ab batao lene wale kahan hain.")
             chooseSendWay()
             return
         }
         val result = IntentIntegrator.parseActivityResult(requestCode, resultCode, data)
         if (result != null) {
             val contents = result.contents
-            if (contents == null) say("QR scan nahi hua. Camera ko lene wale phone ke QR ke saamne rakho aur dobara try karo.")
-            else startSending(contents)
+            if (contents == null) say("QR scan nahi hua. Camera ko bhejne wale phone ke QR ke saamne rakho aur dobara try karo.")
+            else startJoining(contents)
             return
         }
         super.onActivityResult(requestCode, resultCode, data)
@@ -785,16 +872,72 @@ class MainActivity : Activity() {
         return sb.toString()
     }
 
-    // ------------------------------------------------------ nearby: receiver
+    private fun wifiQr(ssid: String, pass: String) = "WIFI:T:WPA;S:$ssid;P:$pass;;"
 
-    private fun startReceiving(band: Int) {
+    /** Reads a standard Wi-Fi QR ("WIFI:T:WPA;S:..;P:..;;"). Returns name and password. */
+    private fun parseWifiQr(text: String): Pair<String, String>? {
+        if (!text.startsWith("WIFI:")) return null
+        var ssid: String? = null
+        var pass: String? = null
+        val body = text.substring(5)
+        val fields = ArrayList<String>()
+        val cur = StringBuilder()
+        var i = 0
+        while (i < body.length) {
+            val ch = body[i]
+            if (ch == '\\' && i + 1 < body.length) {
+                cur.append(body[i + 1])
+                i += 2
+                continue
+            }
+            if (ch == ';') {
+                fields.add(cur.toString())
+                cur.setLength(0)
+            } else {
+                cur.append(ch)
+            }
+            i++
+        }
+        if (cur.isNotEmpty()) fields.add(cur.toString())
+        for (f in fields) {
+            if (f.startsWith("S:")) ssid = f.substring(2)
+            if (f.startsWith("P:")) pass = f.substring(2)
+        }
+        val s = ssid ?: return null
+        val p = pass ?: return null
+        return Pair(s, p)
+    }
+
+    private fun showQr(content: String) {
+        try {
+            val bmp = BarcodeEncoder().encodeBitmap(content, BarcodeFormat.QR_CODE, 700, 700)
+            qrView.setImageBitmap(bmp)
+            qrView.visibility = View.VISIBLE
+        } catch (e: Exception) {
+            say(appFault("QR nahi ban paya (${e.message})."))
+        }
+    }
+
+    // ---------------------------------------------- nearby: sender is the host
+
+    private fun startHosting(band: Int) {
+        val uris = pickedUris
+        if (uris.isEmpty()) return
         val gen = beginSession()
-        showTip(phoneCheck(true))
-        say("Seedha link bana raha hoon...")
-        val ssid = "DIRECT-DS-" + randomText(5)
-        val pass = randomText(12)
-        leaveGroup {
-            if (gen == generation) createGroup(gen, ssid, pass, band)
+        hosting = true
+        showTip(phoneCheck(false))
+        say("Link bana raha hoon...")
+        thread(name = "ds-describe") {
+            val items = Transfer.describe(this, uris)
+            ui.post {
+                if (gen != generation) return@post
+                hostItems = items
+                val ssid = "DIRECT-DS-" + randomText(5)
+                val pass = randomText(12)
+                leaveGroup {
+                    if (gen == generation) createGroup(gen, ssid, pass, band)
+                }
+            }
         }
     }
 
@@ -813,7 +956,7 @@ class MainActivity : Activity() {
             override fun onSuccess() {
                 if (gen != generation) return
                 log("direct link created, band request $band")
-                onGroupReady(gen, ssid, pass)
+                onHostReady(gen, ssid, pass)
             }
 
             override fun onFailure(reason: Int) {
@@ -831,57 +974,167 @@ class MainActivity : Activity() {
         })
     }
 
-    private fun onGroupReady(gen: Int, ssid: String, pass: String) {
-        try {
-            val bmp = BarcodeEncoder().encodeBitmap(
-                "$QR_PREFIX\n$ssid\n$pass\n${Transfer.PORT}", BarcodeFormat.QR_CODE, 700, 700
-            )
-            qrView.setImageBitmap(bmp)
-            qrView.visibility = View.VISIBLE
-        } catch (e: Exception) {
-            stopEverything(appFault("QR nahi ban paya (${e.message})."))
-            return
-        }
-        say("Ready! Doosre phone pe Send files dabao aur yeh QR scan karo.")
+    private fun onHostReady(gen: Int, ssid: String, pass: String) {
+        hostSsid = ssid
+        hostPass = pass
+        showingUrlQr = false
+        showQr(wifiQr(ssid, pass))
+        altView.text = "iPhone ya laptop pe lena hai? Yahan dabao"
+        altView.visibility = View.VISIBLE
+        btnCancel.text = "Band karo"
+        say("Ready! Lene wale phone pe DropSwift → Receive → yeh QR scan karo. 3 ya zyada phone bhi ek-ek karke scan kar sakte hain.")
         showLinkBand(gen, 0)
+        holdWifi()
+        startHostTicker(gen)
 
-        thread(name = "ds-receive") {
-            var error: Throwable? = null
+        thread(name = "ds-host") {
             try {
                 val server = ServerSocket()
                 track(server)
                 server.reuseAddress = true
                 server.receiveBufferSize = Transfer.SOCKET_BUFFER
                 server.bind(InetSocketAddress(Transfer.PORT))
-                Transfer.receive(this, server, progress, { c -> track(c) }) {
-                    ui.post { if (gen == generation) onTransferStarted("File aa rahi hai...") }
+                Transfer.serve(server, pass, { c -> track(c) }) { name, sockets ->
+                    if (gen == generation) servePeer(gen, name, sockets)
                 }
             } catch (e: Throwable) {
-                error = e
+                log("host failed: ${e.message}")
+                ui.post { if (gen == generation) stopEverything(diagnose(e)) }
             }
-            ui.post { if (gen == generation) onTransferEnded(error, "Download/DropSwift mein save ho gayi") }
+        }
+        try {
+            val w = WebShare(applicationContext, hostItems, pass)
+            w.start { c -> track(c) }
+            track(w)
+            web = w
+        } catch (e: Throwable) {
+            log("browser share failed: ${e.message}")
         }
     }
 
-    // -------------------------------------------------------- nearby: sender
+    /** Runs on its own thread for each receiver that joins. */
+    private fun servePeer(gen: Int, name: String, sockets: List<Socket>) {
+        val peer = Peer(name)
+        peers.add(peer)
+        log("receiver joined: $name")
+        ui.post { if (gen == generation) say("$name jud gaya, bhej raha hoon... Aur phone bhi scan kar sakte hain.") }
+        val t0 = SystemClock.elapsedRealtime()
+        try {
+            peer.status = "bhej raha hoon"
+            Transfer.send(this, sockets, hostItems, peer.p)
+            peer.ok = true
+            peer.status = "pahunch gayi, 100% match"
+        } catch (e: Throwable) {
+            peer.status = diagnose(e)
+            log("receiver $name failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+        peer.done = true
+        val secs = (SystemClock.elapsedRealtime() - t0) / 1000.0
+        val avg = if (secs > 0) peer.p.done.get() / 1048576.0 / secs else 0.0
+        log(String.format(
+            Locale.US, "result %s: %s | %.1f MB/s avg, %s in %.1f s | per connection: waited on Wi-Fi %.1f s, on storage %.1f s",
+            name, if (peer.ok) "ok" else "failed", avg, size(peer.p.done.get()), secs,
+            peer.p.netNanos.get() / 1e9 / peer.p.streams, peer.p.diskNanos.get() / 1e9 / peer.p.streams
+        ))
+        ui.post { if (gen == generation) onPeerFinished() }
+    }
+
+    private fun onPeerFinished() {
+        val list = synchronized(peers) { ArrayList(peers) }
+        if (list.isEmpty() || list.any { !it.done }) return
+        val ok = list.count { it.ok }
+        if (ok == list.size) {
+            say("Ho gaya! $ok phone ko bhej diya, sab mein 100% match. Aur phone ho toh QR scan karwao, warna Band karo dabao.")
+        } else {
+            val bad = list.first { !it.ok }
+            say("${ok}/${list.size} phone ko pahunchi. ${bad.name}: ${bad.status}")
+        }
+    }
+
+    private fun toggleBrowserQr() {
+        if (!hosting) return
+        showingUrlQr = !showingUrlQr
+        val url = "http://${WebShare.groupAddress()}:${WebShare.PORT}/$hostPass/"
+        if (showingUrlQr) {
+            showQr(url)
+            altView.text = "Wapas Wi-Fi wala QR dikhao"
+            say("iPhone: 1) Pehle 'wapas' dabake Wi-Fi wala QR camera se scan karo, Join dabao. 2) Phir yeh QR scan karo, Safari khulega, file pe tap karo.\nLaptop: Wi-Fi list mein \"$hostSsid\" chuno, password \"$hostPass\", phir browser mein $url kholo.")
+        } else {
+            showQr(wifiQr(hostSsid, hostPass))
+            altView.text = "iPhone ya laptop pe lena hai? Yahan dabao"
+            say("Yeh QR DropSwift wale phone aur iPhone camera dono scan kar sakte hain.")
+        }
+    }
+
+    private fun startHostTicker(gen: Int) {
+        startedAt = SystemClock.elapsedRealtime()
+        lastTickAt = startedAt
+        lastTickBytes = 0
+        ui.postDelayed(object : Runnable {
+            override fun run() {
+                if (gen != generation || !hosting) return
+                hostTick()
+                ui.postDelayed(this, 400)
+            }
+        }, 400)
+    }
+
+    private fun hostTick() {
+        val list = synchronized(peers) { ArrayList(peers) }
+        val w = web
+        val now = SystemClock.elapsedRealtime()
+        val moved = list.sumOf { it.p.done.get() } + (w?.bytes?.get() ?: 0L)
+        val dt = (now - lastTickAt) / 1000.0
+        if (dt > 0 && (list.any { !it.done } || (w?.active?.get() ?: 0) > 0)) {
+            speedView.text = String.format(Locale.US, "%.1f MB/s", (moved - lastTickBytes) / 1048576.0 / dt)
+        }
+        lastTickAt = now
+        lastTickBytes = moved
+        val lines = ArrayList<String>()
+        for (peer in list) {
+            val total = peer.p.total
+            val pct = if (total > 0) peer.p.done.get() * 100 / total else 0
+            lines.add(
+                if (peer.done) "${peer.name}: ${if (peer.ok) "pahunch gayi ✓ 100% match" else "nahi pahunchi ✗"}"
+                else if (total > 0 && pct >= 100) "${peer.name}: woh jaanch kar raha hai..."
+                else "${peer.name}: $pct%"
+            )
+        }
+        if (w != null && (w.active.get() > 0 || w.finished.get() > 0)) {
+            lines.add("${w.lastClient.ifEmpty { "Browser" }}: ${w.active.get()} download chal rahe, ${w.finished.get()} poore, ${size(w.bytes.get())}")
+        }
+        detailView.text = if (lines.isEmpty()) "Abhi koi juda nahi" else lines.joinToString("\n")
+        val running = list.filter { !it.done }
+        if (running.isNotEmpty()) {
+            val total = running.sumOf { it.p.total }
+            val done = running.sumOf { it.p.done.get() }
+            bar.visibility = View.VISIBLE
+            if (total > 0) bar.progress = ((done * 1000) / total).toInt().coerceIn(0, 1000)
+        }
+    }
+
+    // ---------------------------------------------- nearby: receiver joins
 
     @SuppressLint("MissingPermission")
-    private fun startSending(qr: String) {
-        val parts = qr.trim().split("\n")
-        if (parts.size < 4 || parts[0] != QR_PREFIX) {
-            say("Yeh DropSwift ka QR nahi hai. Lene wale phone pe Receive files dabake jo QR aata hai woh scan karo.")
+    private fun startJoining(qr: String) {
+        val text = qr.trim()
+        if (text.startsWith("DSWIFT1")) {
+            say(appFault("bhejne wale phone pe purana DropSwift hai. Dono phone pe naya version install karo."))
             return
         }
-        val ssid = parts[1]
-        val pass = parts[2]
-        val port = parts[3].trim().toIntOrNull() ?: Transfer.PORT
+        val wifi = parseWifiQr(text)
+        if (wifi == null || !wifi.first.startsWith("DIRECT-DS-")) {
+            say("Yeh DropSwift ka QR nahi hai. Bhejne wale phone pe Send files → file chuno → 'Paas mein'. Jo QR aata hai woh scan karo.")
+            return
+        }
+        val ssid = wifi.first
+        val pass = wifi.second
         val m = p2p
         val c = channel
         if (m == null || c == null) return
-        val uris = pickedUris
         val gen = beginSession()
-        showTip(phoneCheck(false))
-        say("Doosre phone se jud raha hoon...")
+        showTip(phoneCheck(true))
+        say("Bhejne wale phone se jud raha hoon...")
 
         leaveGroup {
             if (gen != generation) return@leaveGroup
@@ -898,10 +1151,10 @@ class MainActivity : Activity() {
                     waitForOwner(gen, SystemClock.elapsedRealtime() + 40_000) { owner ->
                         if (gen != generation) return@waitForOwner
                         if (owner == null) {
-                            stopEverything(netFault("doosre phone se jud nahi paya. Dono phone paas rakho aur dobara try karo."))
+                            stopEverything(netFault("bhejne wale phone se jud nahi paya. Dono phone paas rakho, uska QR khula rakho, aur dobara scan karo."))
                         } else {
                             showLinkBand(gen, 0)
-                            runSender(gen, owner, port, uris)
+                            runJoin(gen, owner, pass)
                         }
                     }
                 }
@@ -933,63 +1186,33 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun runSender(gen: Int, owner: InetAddress, port: Int, uris: List<Uri>) {
-        say("Jud gaya. Shuru kar raha hoon...")
-        thread(name = "ds-send") {
+    private fun runJoin(gen: Int, owner: InetAddress, pass: String) {
+        say("Jud gaya. File ka intezaar...")
+        val device = "${Build.MANUFACTURER} ${Build.MODEL}"
+        thread(name = "ds-join") {
             var error: Throwable? = null
             try {
-                val items = Transfer.describe(this, uris)
-                progress.total = items.sumOf { it.size }
-                var socket: Socket? = null
-                var last: Exception? = null
-                for (attempt in 0 until 40) {
-                    if (gen != generation) return@thread
-                    val s = Socket()
-                    try {
-                        s.sendBufferSize = Transfer.SOCKET_BUFFER
-                        s.connect(InetSocketAddress(owner, port), 1500)
-                        socket = s
-                        break
-                    } catch (e: IOException) {
-                        last = e
-                        try {
-                            s.close()
-                        } catch (_: Exception) {
-                        }
-                        Thread.sleep(500)
-                    }
-                }
-                val s = socket ?: throw IOException("receiver not reachable (${last?.message})")
-                track(s)
-                val sockets = ArrayList<Socket>()
-                sockets.add(s)
-                // Extra connections so several blocks travel at the same time.
-                for (extra in 1 until Transfer.STREAMS) {
-                    val more = Socket()
-                    track(more)
-                    more.sendBufferSize = Transfer.SOCKET_BUFFER
-                    more.connect(InetSocketAddress(owner, port), 5000)
-                    sockets.add(more)
-                }
-                ui.post { if (gen == generation) onTransferStarted("File ja rahi hai...") }
-                Transfer.send(this, sockets, items, progress)
+                val sockets = Transfer.join(owner, Transfer.PORT, pass, device) { c -> track(c) }
+                ui.post { if (gen == generation) onTransferStarted("File aa rahi hai...") }
+                Transfer.receive(this, sockets, progress)
             } catch (e: Throwable) {
                 error = e
             }
-            ui.post { if (gen == generation) onTransferEnded(error, "Pahunch gayi") }
+            ui.post { if (gen == generation) onTransferEnded(error, "Download/DropSwift mein save ho gayi") }
         }
     }
 
     // --------------------------------------------------------- internet mode
 
     private fun startInternetReceive() {
+        if (active) return
         val gen = beginSession()
         showTip(phoneCheck(true))
         val code = randomText(8)
         shareCode = code
         speedView.text = code.substring(0, 4) + " " + code.substring(4)
         linkView.text = "Internet mode. Code pe dabao toh share ho jayega."
-        say("Yeh code bhejne wale ko batao. Woh Send files mein 'Door hai - internet se' chun ke yeh code daalega. Is screen ko khula rakho.")
+        say("Yeh code bhejne wale ko batao. Woh Send files → file chun ke 'Bahut door - internet code se' chunega aur yeh code daalega. Is screen ko khula rakho.")
         val link = InternetLink(applicationContext) { line -> log(line) }
         track(link)
         thread(name = "ds-net-receive") {
@@ -1047,11 +1270,15 @@ class MainActivity : Activity() {
         generation++
         active = true
         transferring = false
+        hosting = false
+        peers.clear()
+        web = null
         progress = Progress()
         shareCode = null
         speedView.text = ""
         detailView.text = ""
         linkView.text = ""
+        altView.visibility = View.GONE
         receivedBox.removeAllViews()
         searchBox.removeAllViews()
         selected.clear()
@@ -1140,8 +1367,8 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun onTransferStarted(word: String) {
-        transferring = true
+    private fun holdWifi() {
+        if (wifiLock != null) return
         try {
             val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
             val lock = wifi.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "dropswift")
@@ -1150,6 +1377,11 @@ class MainActivity : Activity() {
             wifiLock = lock
         } catch (_: Exception) {
         }
+    }
+
+    private fun onTransferStarted(word: String) {
+        transferring = true
+        holdWifi()
         qrView.visibility = View.GONE
         bar.visibility = View.VISIBLE
         bar.progress = 0
@@ -1168,9 +1400,16 @@ class MainActivity : Activity() {
     }
 
     private fun tick() {
+        val total = progress.total
+        if (progress.phase == "verify") {
+            val v = progress.verifyDone.get()
+            speedView.text = "Jaanch..."
+            if (total > 0) bar.progress = ((v * 1000) / total).toInt().coerceIn(0, 1000)
+            detailView.text = "File 100% sahi hai ya nahi, SHA-256 se jaanch rahe hain\n${size(v)} / ${size(total)}"
+            return
+        }
         val now = SystemClock.elapsedRealtime()
         val done = progress.done.get()
-        val total = progress.total
         val dt = (now - lastTickAt) / 1000.0
         if (dt > 0) {
             val mbps = (done - lastTickBytes) / 1048576.0 / dt
@@ -1191,16 +1430,18 @@ class MainActivity : Activity() {
             bar.progress = 1000
             val avg = if (secs > 0) done / 1048576.0 / secs else 0.0
             speedView.text = String.format(Locale.US, "%.1f MB/s", avg)
+            val checked = progress.verified.get()
+            val integrity = if (checked > 0) "sab $checked file 100% sahi (SHA-256 match)" else okWord
             detailView.text = String.format(
-                Locale.US, "%d file, %s, %.1f second mein (upar average speed)\n%s",
-                progress.files.get(), size(done), secs, okWord
+                Locale.US, "%d file, %s, %.1f second mein (upar average speed, jaanch ka time mila ke)\n%s",
+                progress.files.get(), size(done), secs, integrity
             )
-            say("Ho gaya! Sab files $okWord.")
+            say(if (checked > 0) "Ho gaya! $integrity. $okWord." else "Ho gaya! $okWord.")
             showReceived(ArrayList(progress.saved))
             log(String.format(
-                Locale.US, "result: %.1f MB/s avg, %s in %.1f s | %d connections | per connection: waited on Wi-Fi %.1f s, on storage %.1f s",
+                Locale.US, "result: %.1f MB/s avg, %s in %.1f s | %d connections | per connection: waited on Wi-Fi %.1f s, on storage %.1f s | verified %d",
                 avg, size(done), secs, progress.streams,
-                progress.netNanos.get() / 1e9 / progress.streams, progress.diskNanos.get() / 1e9 / progress.streams
+                progress.netNanos.get() / 1e9 / progress.streams, progress.diskNanos.get() / 1e9 / progress.streams, checked
             ))
         } else {
             log("failed: ${error.javaClass.simpleName}: ${error.message}")
@@ -1216,7 +1457,9 @@ class MainActivity : Activity() {
         generation++
         active = false
         transferring = false
+        hosting = false
         shareCode = null
+        web = null
         try {
             wifiLock?.release()
         } catch (_: Exception) {
@@ -1225,6 +1468,7 @@ class MainActivity : Activity() {
         closeAll()
         leaveGroup { }
         qrView.visibility = View.GONE
+        altView.visibility = View.GONE
         setBusy(false)
     }
 
@@ -1258,6 +1502,5 @@ class MainActivity : Activity() {
     companion object {
         private const val REQ_PERMISSION = 11
         private const val REQ_PICK = 12
-        private const val QR_PREFIX = "DSWIFT1"
     }
 }
