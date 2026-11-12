@@ -483,9 +483,21 @@ class MainActivity : Activity() {
         val wantsWhere = has("kahan", "kaha ", "where", "folder") && has("file", "save", "gayi", "gaya", "aayi")
         val wantsReceive = has("receive", "lena", "leni", "le lo", "lelo", "mangw", "aa rahi", "aane", "lunga", "lungi")
         val wantsSend = has("bhej", "send", "share", "de do", "dedo", "dena", "transfer")
+        val wantsGoogle = has("google", "search karo", "net pe dekh", "internet pe dekh")
+        val wantsSafe = has("safe", "secure", "suraksh", "hack", "privacy", "chori")
+        val wantsHowMany = has("kitne phone", "kitne log", "how many", "ek saath kitne")
+        val wantsNoNet = has("bina internet", "without internet", "net chahiye", "internet chahiye", "data lagega", "data lagta")
+        val isQuestion = raw.contains("?") || has(
+            "kya", "kyun", "kyu", "kyon", "kaise", "kese", "kab", "kaun", "kon", "kitna", "kitni", "kitne",
+            "what", "why", "how", "when", "which", "who", "matlab", "meaning"
+        )
 
         when {
             active -> say("Abhi ek kaam chal raha hai. Khatam hone do, ya Cancel/Band karo dabao.")
+            wantsGoogle -> openGoogle(raw.replace(Regex("(?i)google( pe| par| se)?|search karo|dhoondo|dhundo"), " ").trim())
+            wantsSafe -> say("Paas wale mode mein file seedhi phone se phone jaati hai, kisi server pe nahi. Har baar naya random password wala link banta hai, sirf QR scan karne wala jud sakta hai, aur har file SHA-256 se jaanchi jaati hai.")
+            wantsHowMany -> say("Ek QR ko 3 ya zyada phone scan kar sakte hain. Par speed un sab mein bant jaati hai, toh jitne zyada phone, har ek ko utni kam speed.")
+            wantsNoNet -> say("Paas wale mode mein internet ya data bilkul nahi lagta, bas dono phone ka Wi-Fi on hona chahiye. Internet sirf 'Bahut door' wale mode mein lagta hai.")
             wantsWhere -> say("Aayi hui files phone ke Download/DropSwift folder mein hoti hain. Ho jaane ke baad list mein naam pe dabao toh seedha khul jayegi.")
             wantsApple -> say("iPhone ya laptop pe app nahi chahiye. Is phone pe Send files dabao, file chuno, 'Paas mein' chuno. Phir QR ke neeche 'iPhone ya laptop' dabao, main steps bataunga.")
             wantsSpeed -> say("Speed ke liye: 1) dono phone paas rakho, 2) dono ko ghar ke Wi-Fi router se disconnect karo, 3) battery saver band karo, 4) jo phone tez hai usse bhejo. Ek saath 3 phone lenge toh speed teeno mein bantegi.")
@@ -507,7 +519,47 @@ class MainActivity : Activity() {
                     onSendClicked()
                 }
             }
+            isQuestion && !wantsHelp -> offerGoogle(raw)
             else -> findFiles(raw)
+        }
+    }
+
+    /** Swifty does not know the answer: offer to look it up on the web. */
+    private fun offerGoogle(question: String) {
+        say("Yeh mujhe pakka nahi pata. Google pe dhoond ke dikhaun?")
+        AlertDialog.Builder(this)
+            .setTitle("Google pe dhoondun?")
+            .setMessage(question)
+            .setPositiveButton("Haan, dhoondo") { _, _ -> openGoogle(question) }
+            .setNegativeButton("Nahi", null)
+            .show()
+    }
+
+    private fun openGoogle(question: String) {
+        if (question.length < 2) {
+            say("Kya dhoondna hai? Likho, jaise \"google wifi direct kya hai\".")
+            return
+        }
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://www.google.com/search?q=" + Uri.encode(question))))
+            say("Google khol diya. Jawab dekh ke wapas aa jao.")
+        } catch (e: Exception) {
+            say(phoneFault("browser nahi khul raha. Internet aur browser app check karo."))
+        }
+    }
+
+    /** During a transfer: speak up once if the speed falls far below what this link was giving. */
+    private var peakSpeed = 0.0
+    private var slowTicks = 0
+    private var slowTold = false
+
+    private fun watchSpeed(mbps: Double) {
+        if (mbps > peakSpeed) peakSpeed = mbps
+        if (peakSpeed < 5.0 || slowTold) return
+        if (mbps < peakSpeed * 0.3) slowTicks++ else slowTicks = 0
+        if (slowTicks >= 15) {
+            slowTold = true
+            showTip("Swifty: speed gir gayi hai (pehle ${peakSpeed.toInt()} MB/s thi). Dono phone paas laao aur beech mein kuch na ho.")
         }
     }
 
@@ -1583,6 +1635,9 @@ class MainActivity : Activity() {
         startedAt = SystemClock.elapsedRealtime()
         lastTickAt = startedAt
         lastTickBytes = 0
+        peakSpeed = 0.0
+        slowTicks = 0
+        slowTold = false
         val gen = generation
         ui.postDelayed(object : Runnable {
             override fun run() {
@@ -1608,6 +1663,7 @@ class MainActivity : Activity() {
         if (dt > 0) {
             val mbps = (done - lastTickBytes) / 1048576.0 / dt
             speedView.text = String.format(Locale.US, "%.1f MB/s", mbps)
+            watchSpeed(mbps)
         }
         lastTickAt = now
         lastTickBytes = done
