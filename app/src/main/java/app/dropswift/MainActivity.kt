@@ -3,6 +3,7 @@ package app.dropswift
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -17,6 +18,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.MediaStore
 import android.provider.Settings
 import android.view.Gravity
 import android.view.View
@@ -52,6 +54,8 @@ class MainActivity : Activity() {
     private lateinit var speedView: TextView
     private lateinit var linkView: TextView
     private lateinit var logView: TextView
+    private lateinit var logToggle: TextView
+    private lateinit var receivedBox: LinearLayout
     private val logLines = ArrayList<String>()
     private lateinit var qrView: ImageView
     private lateinit var bar: ProgressBar
@@ -116,6 +120,7 @@ class MainActivity : Activity() {
                 file.delete()
                 setStatus("App closed last time. Send a screenshot of the text below")
                 log(textOfCrash)
+                showLog(true)
             }
         } catch (_: Throwable) {
         }
@@ -220,8 +225,18 @@ class MainActivity : Activity() {
         btnCancel.setOnClickListener { stopEverything("Cancelled") }
         root.addView(btnCancel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)))
 
+        receivedBox = LinearLayout(this)
+        receivedBox.orientation = LinearLayout.VERTICAL
+        root.addView(receivedBox, wide)
+
         root.addView(gap(18))
+        logToggle = text(12f, Color.parseColor("#71829B"))
+        logToggle.text = "Show details"
+        logToggle.setPadding(dp(8), dp(8), dp(8), dp(8))
+        logToggle.setOnClickListener { showLog(logView.visibility != View.VISIBLE) }
+        root.addView(logToggle, wide)
         logView = TextView(this)
+        logView.visibility = View.GONE
         logView.textSize = 11f
         logView.setTextColor(Color.parseColor("#71829B"))
         logView.setTextIsSelectable(true)
@@ -239,6 +254,52 @@ class MainActivity : Activity() {
     private fun setStatus(s: String) {
         ui.post { statusView.text = s }
         log("> $s")
+    }
+
+    private fun showLog(show: Boolean) {
+        logView.visibility = if (show) View.VISIBLE else View.GONE
+        logToggle.text = if (show) "Hide details" else "Show details"
+    }
+
+    /** List of files that just arrived; tap one to open it. */
+    private fun showReceived(items: List<Pair<String, Uri>>) {
+        receivedBox.removeAllViews()
+        if (items.isEmpty()) return
+        val head = text(14f, Color.WHITE, true)
+        head.text = "Received files (tap to open)"
+        head.setPadding(0, dp(14), 0, dp(6))
+        receivedBox.addView(head)
+        for ((name, uri) in items.take(200)) {
+            val row = TextView(this)
+            row.text = name
+            row.textSize = 14f
+            row.setTextColor(Color.parseColor("#C8D7E9"))
+            row.setBackgroundColor(Color.parseColor("#151C2E"))
+            row.setPadding(dp(12), dp(12), dp(12), dp(12))
+            row.setOnClickListener { openFile(uri) }
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            lp.topMargin = dp(4)
+            receivedBox.addView(row, lp)
+        }
+        if (items.size > 200) {
+            val more = text(12f, Color.parseColor("#9AA9BD"))
+            more.text = "and ${items.size - 200} more in Download/DropSwift"
+            receivedBox.addView(more)
+        }
+    }
+
+    private fun openFile(uri: Uri) {
+        try {
+            val i = Intent(Intent.ACTION_VIEW)
+            i.setDataAndType(uri, contentResolver.getType(uri) ?: "*/*")
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            startActivity(i)
+        } catch (e: Exception) {
+            setStatus("No app on this phone can open that file")
+        }
     }
 
     private fun setBusy(busy: Boolean) {
@@ -280,7 +341,36 @@ class MainActivity : Activity() {
     }
 
     private fun proceed() {
-        if (pendingAction == ACTION_SEND) pickFiles() else startReceiving()
+        if (pendingAction != ACTION_SEND) {
+            startReceiving()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("What do you want to send?")
+            .setItems(arrayOf("Photos and videos", "Any files")) { _, which ->
+                if (which == 0) pickMedia() else pickFiles()
+            }
+            .show()
+    }
+
+    private fun pickMedia() {
+        log("opening photo picker")
+        val i: Intent
+        if (Build.VERSION.SDK_INT >= 33) {
+            i = Intent(MediaStore.ACTION_PICK_IMAGES)
+            i.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, MediaStore.getPickImagesMaxLimit())
+        } else {
+            i = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            i.addCategory(Intent.CATEGORY_OPENABLE)
+            i.type = "*/*"
+            i.putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("image/*", "video/*"))
+            i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        }
+        try {
+            startActivityForResult(i, REQ_PICK)
+        } catch (e: Exception) {
+            pickFiles()
+        }
     }
 
     private fun pickFiles() {
@@ -550,6 +640,7 @@ class MainActivity : Activity() {
         speedView.text = ""
         detailView.text = ""
         linkView.text = ""
+        receivedBox.removeAllViews()
         bar.visibility = View.GONE
         qrView.visibility = View.GONE
         setBusy(true)
@@ -683,6 +774,7 @@ class MainActivity : Activity() {
                 progress.files.get(), size(done), secs, okWord
             )
             setStatus("Done")
+            showReceived(ArrayList(progress.saved))
             log(String.format(
                 Locale.US, "result: %.1f MB/s avg, %s in %.1f s | %d connections | per connection: waited on Wi-Fi %.1f s, on storage %.1f s",
                 avg, size(done), secs, progress.streams,

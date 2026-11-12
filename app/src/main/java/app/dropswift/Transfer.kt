@@ -35,6 +35,8 @@ class Progress {
     /** Time spent waiting on the Wi-Fi link and on phone storage (summed over all connections). */
     val netNanos = AtomicLong(0)
     val diskNanos = AtomicLong(0)
+    /** Files saved on this phone in this transfer: name and where it is. */
+    val saved: MutableList<Pair<String, Uri>> = java.util.Collections.synchronizedList(ArrayList())
 }
 
 /**
@@ -317,6 +319,7 @@ object Transfer {
             val v = ContentValues()
             v.put(MediaStore.Downloads.IS_PENDING, 0)
             ctx.contentResolver.update(f.uri!!, v, null, null)
+            p.saved.add(Pair(f.name, f.uri!!))
             p.files.incrementAndGet()
         }
 
