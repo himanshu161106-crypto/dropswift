@@ -46,10 +46,13 @@ import com.journeyapps.barcodescanner.BarcodeEncoder
 import java.io.Closeable
 import java.io.EOFException
 import java.io.File
+import java.io.IOException
 import java.io.PrintWriter
 import java.io.StringWriter
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.security.SecureRandom
@@ -114,6 +117,9 @@ class MainActivity : Activity() {
     private var hostSsid = ""
     private var hostPass = ""
     private var showingUrlQr = false
+    private var hostLan = false
+    private var hostAddress = ""
+    private var lanQr = ""
     private var web: WebShare? = null
 
     private class Found(val uri: Uri, val name: String, val size: Long, val folder: String)
@@ -406,6 +412,8 @@ class MainActivity : Activity() {
                 phoneFault("internet nahi chal raha. Data ya Wi-Fi check karke dobara try karo.")
             m.contains("did not join in time") ->
                 "Doosra phone juda hi nahi. Code sahi daala tha? Dobara try karo."
+            m.contains("lan sender not found") ->
+                netFault("bhejne wala phone is network pe nahi mila. Dono phone ek hi hotspot ya Wi-Fi pe hone chahiye. Lene wale phone ko pehle bhejne wale ke hotspot se jodo, phir QR scan karo.")
             m.contains("not reachable") ->
                 netFault("bhejne wale phone tak pahunch nahi paya. Dono phone paas laao, bhejne wale pe QR khula rakho, phir dobara scan karo.")
             m.contains("address already in use") || m.contains("eaddrinuse") ->
@@ -717,12 +725,14 @@ class MainActivity : Activity() {
                 arrayOf(
                     "Paas mein - QR dikhao (sabse tez, kai phone ek saath)",
                     "20 m tak - QR dikhao (dheema, door tak)",
+                    "Hotspot ya same Wi-Fi se - QR dikhao (naya, test)",
                     "Bahut door - internet code se"
                 )
             ) { _, which ->
                 when (which) {
                     0 -> ensureNearby { startHosting(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ) }
                     1 -> ensureNearby { startHosting(WifiP2pConfig.GROUP_OWNER_BAND_2GHZ) }
+                    2 -> startLanHosting()
                     else -> askCode()
                 }
             }
@@ -992,6 +1002,66 @@ class MainActivity : Activity() {
         btnCancel.text = "Band karo"
         say("Ready! Lene wale phone pe DropSwift → Receive → yeh QR scan karo. 3 ya zyada phone bhi ek-ek karke scan kar sakte hain.")
         showLinkBand(gen, 0)
+        startServers(gen, pass)
+    }
+
+    /** Addresses of this phone on its hotspot or on the Wi-Fi it has joined. */
+    private fun lanAddresses(): List<String> {
+        val out = ArrayList<String>()
+        try {
+            for (ni in NetworkInterface.getNetworkInterfaces()) {
+                if (!ni.isUp || ni.isLoopback) continue
+                val n = ni.name.lowercase(Locale.US)
+                if (n.startsWith("p2p") || n.startsWith("rmnet") || n.startsWith("ccmni") ||
+                    n.startsWith("dummy") || n.startsWith("tun")
+                ) continue
+                for (a in ni.inetAddresses) {
+                    if (a is Inet4Address && a.isSiteLocalAddress) a.hostAddress?.let { out.add(it) }
+                }
+            }
+        } catch (_: Throwable) {
+        }
+        return out
+    }
+
+    /** Sender side for hotspot / same Wi-Fi: no Wi-Fi Direct link, the network already exists. */
+    private fun startLanHosting() {
+        val uris = pickedUris
+        if (uris.isEmpty()) return
+        val ips = lanAddresses()
+        if (ips.isEmpty()) {
+            say(phoneFault("yeh phone kisi Wi-Fi pe nahi hai aur hotspot bhi band hai. Phone ka hotspot on karo (hotspot settings mein band 5 GHz chuno), ya dono phone ek hi Wi-Fi se jodo. Phir dobara try karo."))
+            return
+        }
+        val gen = beginSession()
+        hosting = true
+        hostLan = true
+        showTip(phoneCheck(false))
+        say("Tayyar kar raha hoon...")
+        thread(name = "ds-describe") {
+            val items = Transfer.describe(this, uris)
+            ui.post {
+                if (gen != generation) return@post
+                hostItems = items
+                val secret = randomText(12)
+                hostPass = secret
+                hostSsid = ""
+                hostAddress = ips[0]
+                showingUrlQr = false
+                lanQr = "DSLAN1\n${ips.joinToString(",")}\n${Transfer.PORT}\n$secret"
+                showQr(lanQr)
+                altView.text = "Laptop ya iPhone (isi network pe)? Yahan dabao"
+                altView.visibility = View.VISIBLE
+                btnCancel.text = "Band karo"
+                linkView.text = "Hotspot / same Wi-Fi mode: ${ips.joinToString(", ")}"
+                log("lan host on ${ips.joinToString(",")}")
+                say("Ready! Lene wala phone pehle isi hotspot ya Wi-Fi se juda ho. Phir uspe DropSwift → Receive → 'Paas mein' → yeh QR scan karo.")
+                startServers(gen, secret)
+            }
+        }
+    }
+
+    private fun startServers(gen: Int, pass: String) {
         holdWifi()
         startHostTicker(gen)
 
@@ -1063,7 +1133,19 @@ class MainActivity : Activity() {
     private fun toggleBrowserQr() {
         if (!hosting) return
         showingUrlQr = !showingUrlQr
-        val url = "http://${WebShare.groupAddress()}:${WebShare.PORT}/$hostPass/"
+        val url = "http://${if (hostLan) hostAddress else WebShare.groupAddress()}:${WebShare.PORT}/$hostPass/"
+        if (hostLan) {
+            if (showingUrlQr) {
+                showQr(url)
+                altView.text = "Wapas DropSwift wala QR dikhao"
+                say("Laptop ya iPhone isi hotspot/Wi-Fi pe ho toh yeh QR scan karo, ya browser mein $url kholo.")
+            } else {
+                showQr(lanQr)
+                altView.text = "Laptop ya iPhone (isi network pe)? Yahan dabao"
+                say("Lene wala phone isi network pe ho, phir DropSwift se yeh QR scan kare.")
+            }
+            return
+        }
         if (showingUrlQr) {
             showQr(url)
             altView.text = "Wapas Wi-Fi wala QR dikhao"
@@ -1131,6 +1213,10 @@ class MainActivity : Activity() {
             say(appFault("bhejne wale phone pe purana DropSwift hai. Dono phone pe naya version install karo."))
             return
         }
+        if (text.startsWith("DSLAN1")) {
+            joinLan(text)
+            return
+        }
         val wifi = parseWifiQr(text)
         if (wifi == null || !wifi.first.startsWith("DIRECT-DS-")) {
             say("Yeh DropSwift ka QR nahi hai. Bhejne wale phone pe Send files → file chuno → 'Paas mein'. Jo QR aata hai woh scan karo.")
@@ -1173,6 +1259,62 @@ class MainActivity : Activity() {
                     stopEverything(phoneFault("phone judne nahi de raha (code $reason). Wi-Fi ek baar band karke on karo, phir dobara try karo."))
                 }
             })
+        }
+    }
+
+    /** Receiver side for hotspot / same Wi-Fi. */
+    private fun joinLan(text: String) {
+        val parts = text.split("\n")
+        if (parts.size < 4) {
+            say("QR theek se nahi padha gaya. Dobara scan karo.")
+            return
+        }
+        val ips = parts[1].split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        val port = parts[2].trim().toIntOrNull() ?: Transfer.PORT
+        val secret = parts[3].trim()
+        val gen = beginSession()
+        showTip(phoneCheck(true))
+        linkView.text = "Hotspot / same Wi-Fi mode"
+        say("Bhejne wale phone ko network pe dhoond raha hoon...")
+        val device = "${Build.MANUFACTURER} ${Build.MODEL}"
+        thread(name = "ds-join-lan") {
+            var error: Throwable? = null
+            try {
+                var owner: InetAddress? = null
+                val deadline = SystemClock.elapsedRealtime() + 15_000
+                while (owner == null && SystemClock.elapsedRealtime() < deadline && gen == generation) {
+                    for (ip in ips) {
+                        val probe = Socket()
+                        try {
+                            probe.connect(InetSocketAddress(ip, port), 1200)
+                            owner = InetAddress.getByName(ip)
+                        } catch (_: Exception) {
+                        } finally {
+                            try {
+                                probe.close()
+                            } catch (_: Exception) {
+                            }
+                        }
+                        if (owner != null) break
+                    }
+                    if (owner == null) Thread.sleep(500)
+                }
+                val found = owner ?: throw IOException("lan sender not found")
+                try {
+                    val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                    val info = wifi.connectionInfo
+                    val line = "Network: ${info.frequency} MHz, link ${info.linkSpeed} Mbps"
+                    log(line)
+                    ui.post { if (gen == generation) linkView.text = line }
+                } catch (_: Throwable) {
+                }
+                val sockets = Transfer.join(found, port, secret, device) { c -> track(c) }
+                ui.post { if (gen == generation) onTransferStarted("File aa rahi hai...") }
+                Transfer.receive(this, sockets, progress)
+            } catch (e: Throwable) {
+                error = e
+            }
+            ui.post { if (gen == generation) onTransferEnded(error, "Download/DropSwift mein save ho gayi") }
         }
     }
 
@@ -1280,6 +1422,7 @@ class MainActivity : Activity() {
         active = true
         transferring = false
         hosting = false
+        hostLan = false
         peers.clear()
         web = null
         progress = Progress()
