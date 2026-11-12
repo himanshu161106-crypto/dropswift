@@ -1,58 +1,92 @@
 # DropSwift
 
-Phone se phone file bhejne ka Android app. Paas baith ke bina internet ke, ya door se internet ke raaste.
+An Android app for sending files phone to phone. Nearby without internet, or far away over the internet.
 
-**Status: test build.** Neeche har feature ke saamne likha hai ki woh asli phone pe test hua hai ya nahi. Jo test nahi hua, use "done" nahi maana gaya.
+**Status: test build.** Every feature below says whether it has been tested on real phones. A feature that has not been tested on real phones is not counted as done.
 
 ## Download
 
-Sabse naya APK: [Releases](https://github.com/himanshu161106-crypto/dropswift/releases/latest)
+Latest APK: [Releases](https://github.com/himanshu161106-crypto/dropswift/releases/latest)
 
-Android 10 ya upar chahiye. Dono phone pe same build rakho.
+Install the same build on both phones.
 
-## Kaise chalta hai
+## How it works
 
-1. **Bhejne wala:** Send files → file chuno → "Paas mein". Phone apna seedha Wi-Fi link banata hai aur QR dikhata hai.
-2. **Lene wala:** Receive files → "Paas mein" → QR scan karo. File apne-aap aane lagti hai.
-3. Aayi hui files `Download/DropSwift` folder mein milti hain.
+1. **Sender:** Send files → pick files → "Paas mein" (nearby). The phone creates its own direct Wi-Fi link and shows a QR code.
+2. **Receiver:** Receive files → "Paas mein" → scan the QR. The files start arriving on their own.
+3. Received files are saved in `Download/DropSwift`.
+
+The app's own text is in Hinglish.
+
+## What you need
+
+| | Minimum | For the best speed |
+|---|---|---|
+| Android version | Android 10 | Any newer version; the version itself does not change speed |
+| Wi-Fi | Wi-Fi Direct support (almost every Android phone) | 5 GHz Wi-Fi on **both** phones |
+| RAM | Not the limit. The app holds only a few MB of the file in memory at a time | Same |
+| Storage | Free space larger than the files you receive | Same |
+| Distance | Same room | Within about 1 metre, nothing between the phones |
+
+**What decides the speed is the Wi-Fi chip, and the slower of the two phones sets the limit.** RAM, processor and Android version matter very little. Two phones with the same RAM can differ by 10 times.
+
+## Measured speeds (real phones)
+
+These are the only numbers that have actually been measured. Everything else is an expectation.
+
+| Sender → Receiver | Link | Speed | File |
+|---|---|---|---|
+| Honor 200 Pro (Android 16) → Xiaomi 22101316I (Android 14) | 5 GHz, 5240 MHz, 4 connections | 94.9 MB/s | 6.14 GB in 66 s |
+| Same pair, 1 connection | 5 GHz, 5240 MHz | 77.9 MB/s | 4.15 GB in 55 s |
+| Honor 200 Pro → OnePlus CPH2381 (Android 14), OnePlus made the link | 5 GHz, 5785 MHz | 9.4 MB/s | 4.15 GB in 455 s |
+| Honor 200 Pro → OnePlus CPH2381, Honor made the link while also on a home router | 5 GHz, 5200 MHz | 16.7 MB/s | 246 MB in 15 s |
+| Honor 200 Pro ↔ Xiaomi, long-range mode | 2.4 GHz | 3.3–6 MB/s, works to about 20 m | |
+
+So the honest claim today is: **up to about 95 MB/s between two phones with good 5 GHz Wi-Fi, and much less when one phone's Wi-Fi is weak.** Why the OnePlus pair is slow is not yet settled.
+
+## What to expect on other phones (not measured)
+
+- Both phones with 5 GHz Wi-Fi 5 or Wi-Fi 6: roughly 30–95 MB/s.
+- One phone with 2.4 GHz only: roughly 3–10 MB/s.
+- Higher than 95 MB/s needs wider channels (160 MHz) or 6 GHz on both phones. Not tested, so no number is promised.
+
+Things that lower speed on any phone:
+
+- The sender is connected to a home router on a different channel. Build 12 tries to make the link on the router's channel (not yet tested).
+- Battery saver is on.
+- Several receivers at once: the link is shared between them.
+- Many small files instead of a few big ones.
 
 ## Features
 
-| Feature | Kya karta hai | Asli phone pe test |
+| Feature | What it does | Tested on real phones |
 |---|---|---|
-| Paas mein bhejna (Wi-Fi Direct, 5 GHz) | Bina internet, bina router, QR scan karke seedha transfer | Haan. Honor 200 Pro → Xiaomi: ~95 MB/s |
-| 4 connection ek saath | File ke tukde 4 raaston se saath jaate hain | Haan (77.9 → 94.9 MB/s) |
-| Ek QR, kai lene wale | Bhejne wala link banata hai; 3 ya zyada phone wahi QR scan kar sakte hain | Abhi sirf 1 phone ke saath. 3 phone wala test baaki |
-| Integrity (SHA-256) | Har file ki jaanch hoti hai; match na ho toh file hata di jaati hai | 1 file pe "100% match" aaya. Badi files aur kharab-file wala test baaki |
-| Badi files (5 GB, 10 GB) | File tukdon mein jaati hai, memory mein poori nahi rakhi jaati | 6.14 GB tak chala. 10 GB baaki |
-| Door tak mode (2.4 GHz) | Dheema, par thodi zyada doori | Haan: ~20 m tak, 3–6 MB/s |
-| Internet mode | Door ke phone ko code se bhejna; file seedhi phone se phone jaati hai | Baaki |
-| iPhone / laptop (browser se) | App ke bina: Wi-Fi QR se judo, browser mein file download karo | Baaki |
-| Photo / video picker | Gallery jaisa picker, ya koi bhi file | Haan |
-| Naam se file dhoondna | Naam ka hissa likho, file mil jaati hai | Baaki |
-| Swifty bot | Likh ke bolo ("video bhejo", "file leni hai", "speed kam kyun"); dikkat pe batata hai ki galti phone ki hai, network ki, ya app ki | Thoda. Hinglish samajhna baaki |
-| Aayi hui files ki list | Naam pe dabao toh file khul jaati hai | Baaki |
-| Show details | Neeche log dikhta hai: link ka band, speed, kahan waqt gaya | Haan |
+| Nearby transfer (Wi-Fi Direct, 5 GHz) | No internet, no router; scan a QR and it sends | Yes |
+| 4 connections at once | Blocks of the file travel in parallel | Yes (77.9 → 94.9 MB/s) |
+| One QR, many receivers | The sender owns the link; 3 or more phones can scan the same QR | Only with 1 receiver so far. 3 receivers pending |
+| Integrity (SHA-256) | Every file is checked on the receiver; a mismatch is deleted | "100% match" seen on 1 file. Big files and a corrupted-file test pending |
+| Large files (5 GB, 10 GB) | Sent in blocks, never held whole in memory | Works up to 6.14 GB. 10 GB pending |
+| Long-range mode (2.4 GHz) | Slower, reaches a bit further | Yes: about 20 m, 3–6 MB/s |
+| Internet mode | Send to a far-away phone with a code; data goes directly phone to phone | Pending |
+| iPhone / laptop through the browser | No app needed: join with the Wi-Fi QR, download in the browser | Pending |
+| Photo / video picker | Gallery-style picker, or any file | Yes |
+| Find a file by name | Type part of the name | Pending |
+| Swifty bot | Type what you want ("video bhejo", "file leni hai", "speed kam kyun"). On a problem it says whether the fault is the phone, the network or the app | Partly. Typed Hinglish pending |
+| Received files list | Tap a name to open the file | Pending |
+| Show details | A log at the bottom: link band, speed, where the time went | Yes |
 
-## Speed ke baare mein
+## What internet mode sends outside
 
-- Speed dono phone ke Wi-Fi pe depend karti hai; dheema phone had tay karta hai.
-- Honor 200 Pro + Xiaomi: ~95 MB/s. Honor + OnePlus CPH2381: 9–17 MB/s.
-- Bhejne wala phone ghar ke router se juda ho toh speed gir sakti hai. Build 12 se link router ke channel pe banane ki koshish hoti hai (test baaki).
-- Ek saath kai phone lenge toh speed un sab mein bantegi.
+File data never goes to a server. Two public services are used only to connect the two phones: STUN servers (to learn each phone's public address) and ntfy.sh (to hold the two short "how to reach me" notes). On some networks, especially mobile data on both sides, the link cannot be made.
 
-## Internet mode mein kya bahar jaata hai
+## Not there yet
 
-File ka data kisi server pe nahi jaata. Sirf do phone ko milane ke liye do public cheezein use hoti hain: STUN server (phone ka internet pata jaanne ke liye) aur ntfy.sh (dono phone ka chhota "mujh tak aise pahuncho" note rakhne ke liye). Kuch network pe, khaaskar dono taraf mobile data ho, link nahi banta.
+- Transfer keeps running with the screen off or the app in the background
+- Resume from where it stopped when the link breaks
+- A native iPhone app
+- Play Store release (see `PLAY_STORE.md`)
 
-## Abhi jo nahi hai
+## Other files
 
-- Screen band hone ya app badalne pe transfer chalta rahe
-- Link toote toh wahin se dobara shuru
-- iPhone ka apna app
-- Play Store release (dekho `PLAY_STORE.md`)
-
-## Aur files
-
-- `TESTING.md`: asli phone pe test karne ki checklist
-- `PLAY_STORE.md`: Play Store pe daalne se pehle ke kaam
+- `TESTING.md`: checklist for real-phone tests
+- `PLAY_STORE.md`: work needed before a Play Store release
