@@ -62,6 +62,9 @@ object Transfer {
 
     class Item(val uri: Uri, val name: String, val size: Long)
 
+    /** Everything was handed to the link, but the receiver's "got it" never came back. */
+    class NotConfirmed(why: String) : IOException("not confirmed: $why")
+
     private class Rec(val buf: ByteArray?) {
         var kind = REC_BLOCK
         var file = 0
@@ -230,7 +233,14 @@ object Transfer {
         error.get()?.let { throw IOException(it.message ?: it.javaClass.simpleName) }
 
         sockets[0].soTimeout = 120_000
-        if (sockets[0].getInputStream().read() != 1) throw IOException("Receiver did not confirm")
+        val ack = try {
+            sockets[0].getInputStream().read()
+        } catch (e: IOException) {
+            throw NotConfirmed(e.message ?: e.javaClass.simpleName)
+        }
+        if (ack != 1) throw NotConfirmed("no answer")
+        // Closing tells the receiver we have its answer, so it can drop the link safely.
+        for (s in sockets) closeQuietly(s)
     }
 
     // --------------------------------------------------------------- receive
@@ -397,6 +407,13 @@ object Transfer {
         val os = control.socket.getOutputStream()
         os.write(1)
         os.flush()
+        // Keep the link up until the sender has read the answer and hung up (at most 10 s).
+        try {
+            control.socket.soTimeout = 10_000
+            while (control.inp.read() >= 0) {
+            }
+        } catch (_: Exception) {
+        }
     }
 
     fun cleanName(raw: String): String {

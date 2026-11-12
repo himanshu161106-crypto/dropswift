@@ -369,6 +369,8 @@ class MainActivity : Activity() {
         val m = raw.lowercase(Locale.US)
         return when {
             m.contains("cancel") -> "Theek hai, rok diya."
+            m.contains("not confirmed") ->
+                netFault("saara data bhej diya, par aakhri second mein link toot gaya, isliye doosre phone se 'mil gaya' ki khabar nahi aayi. Doosre phone pe Download/DropSwift check karo, file aksar pahunch chuki hoti hai.")
             m.contains("enospc") || m.contains("no space") ->
                 phoneFault("phone ka storage bhar gaya. Thodi jagah khaali karke dobara lo.")
             m.contains("different dropswift version") ->
@@ -1119,10 +1121,11 @@ class MainActivity : Activity() {
                     f >= 4900 -> "5 GHz"
                     else -> "2.4 GHz (slow band)"
                 }
-                var line = "Link: $band, $f MHz"
+                var line = "Link: $band, $f MHz" + (if (group?.isGroupOwner == true) " (this phone made the link)" else "")
                 try {
                     val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
                     val info = wifi.connectionInfo
+                    log("router check: networkId ${info?.networkId}, freq ${info?.frequency}, speed ${info?.linkSpeed} Mbps")
                     if (info != null && info.networkId != -1 && info.frequency > 0 && info.frequency != f) {
                         line += "\nRouter: ${info.frequency} MHz"
                         showTip("Swifty ki salah: phone router se bhi juda hai aur woh alag channel pe hai, isse speed aadhi ho sakti hai. Router se disconnect karke bhejo.")
