@@ -399,12 +399,12 @@ object Transfer {
         os.flush()
     }
 
-    private fun cleanName(raw: String): String {
+    fun cleanName(raw: String): String {
         val n = raw.replace('/', '_').replace('\\', '_').replace("\u0000", "").trim()
         return if (n.isEmpty() || n == "." || n == "..") "file" else n.take(200)
     }
 
-    private fun newDownload(ctx: Context, name: String): Uri {
+    fun newDownload(ctx: Context, name: String): Uri {
         val v = ContentValues()
         v.put(MediaStore.Downloads.DISPLAY_NAME, name)
         v.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/DropSwift")
