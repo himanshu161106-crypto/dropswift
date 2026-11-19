@@ -1,11 +1,8 @@
 package app.dropswift
 
-import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
-import android.os.Environment
 import android.os.ParcelFileDescriptor
-import android.provider.MediaStore
 import android.provider.OpenableColumns
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -23,10 +20,16 @@ import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.security.MessageDigest
 import java.util.BitSet
+import java.util.Locale
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
+import java.util.zip.Deflater
+import java.util.zip.Inflater
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 import kotlin.concurrent.thread
 
 /** Live numbers the screen reads while a transfer runs. */
@@ -40,8 +43,10 @@ class Progress {
     @Volatile var phase: String = ""
     val verifyDone = AtomicLong(0)
     val verified = AtomicInteger(0)
-    /** Bytes the other side already had from an earlier try (not sent again). */
+    /** Bytes the other side already had (earlier try, duplicate, earlier batch): not sent again. */
     @Volatile var resumedBytes: Long = 0
+    /** Bytes that actually went over the link (after compression and encryption). */
+    val wireBytes = AtomicLong(0)
     /** Time spent waiting on the Wi-Fi link and on phone storage (summed over all connections). */
     val netNanos = AtomicLong(0)
     val diskNanos = AtomicLong(0)
@@ -67,11 +72,14 @@ class ResumeState(val transferId: Long, val names: List<String>, val sizes: List
         var hash: ByteArray? = null
         /** All data is here (not yet checked). */
         var complete = false
-        /** SHA-256 checked and the file is visible in Downloads. */
+        /** SHA-256 checked and the file is visible (or it was already on the phone). */
         var verified = false
+        /** Was already on the phone (duplicate or earlier batch); not received now. */
+        var skipped = false
     }
 
     val files = names.map { RFile(it) }
+    var duplicatesChecked = false
 
     fun matches(id: Long, n: List<String>, s: List<Long>) = id == transferId && n == names && s == sizes
 
@@ -80,14 +88,15 @@ class ResumeState(val transferId: Long, val names: List<String>, val sizes: List
         var sum = 0L
         for ((i, f) in files.withIndex()) {
             synchronized(f) {
-                sum += if (f.complete) maxOf(f.expected, 0L) else minOf(f.blocks.cardinality().toLong() * block, sizes[i])
+                sum += if (f.verified) sizes[i]
+                else minOf(f.blocks.cardinality().toLong() * block, sizes[i])
             }
         }
         return sum
     }
 
     fun savedList(): List<Pair<String, Uri>> =
-        files.filter { it.verified && it.uri != null }.map { Pair(it.name, it.uri!!) }
+        files.filter { it.verified && !it.skipped && it.uri != null }.map { Pair(it.name, it.uri!!) }
 
     /** Deletes every file that was not finished and checked, so no half files are left behind. */
     fun discardUnfinished(ctx: Context) {
@@ -96,10 +105,7 @@ class ResumeState(val transferId: Long, val names: List<String>, val sizes: List
                 closeFile(f)
                 val uri = f.uri
                 if (!f.verified && uri != null) {
-                    try {
-                        ctx.contentResolver.delete(uri, null, null)
-                    } catch (_: Exception) {
-                    }
+                    Storage.remove(ctx, uri)
                     f.uri = null
                 }
             }
@@ -125,34 +131,43 @@ class ResumeState(val transferId: Long, val names: List<String>, val sizes: List
 /** Receiver keeps one of these for the whole session. */
 class ResumeStore {
     @Volatile var state: ResumeState? = null
+    /** Everything received in this session ("name|size" -> file), so later batches skip it. */
+    val received: MutableMap<String, Uri> = java.util.Collections.synchronizedMap(HashMap())
+    @Volatile var senderName: String = ""
 }
 
 /**
- * Nearby protocol, version 4. The SENDER owns the link and listens on PORT.
+ * Nearby protocol, version 5. The SENDER owns the link and listens on PORT.
  * Every receiver opens STREAMS connections and starts each with:
  *   int magic, UTF secret, long receiverId, int streamIndex, int streamCount, UTF deviceName
- * The sender writes on connection 0: int magic, long transferId, int fileCount, long totalBytes,
- *   per file (UTF name, long size).
+ * The sender writes on connection 0: int magic, long transferId, UTF senderName, int fileCount, long totalBytes,
+ *   per file (UTF relativePath, long size).
  * The receiver answers on connection 0 with what it already has, per file one byte:
- *   0 = nothing, 1 = complete and checked, 2 = partly: int length + bitmap of 1 MB blocks it has.
+ *   0 = nothing, 1 = has it (complete, or a duplicate it keeps), 2 = partly: int length + bitmap of 1 MB blocks.
  * Then every connection carries records, in any order:
- *   1 = block     : int fileIndex, long offset, int len, len bytes
+ *   1 = block     : int fileIndex, long offset, int rawLen, byte flags, int wireLen, wireLen bytes
+ *                   flags: 1 = deflate-compressed, 2 = AES-256-GCM encrypted (compress first, then encrypt)
  *   2 = file end  : int fileIndex, long fileLength, 32 bytes SHA-256 of the whole file
  *   3 = no more records on this connection
  * The receiver checks every new file's SHA-256 and answers on connection 0 with one byte:
- *   1 = all files arrived and match, 2 = at least one did not match (those will be sent again on the next try).
+ *   1 = all files arrived and match, 2 = at least one did not match (only those are sent again next try).
+ * Encryption key = SHA-256("DropSwift5:" + secret + ":" + transferId), nonce = fileIndex (4 bytes) + offset (8 bytes).
  */
 object Transfer {
     const val PORT = 47800
     const val STREAMS = 4
     const val SOCKET_BUFFER = 2 shl 20
-    private const val MAGIC = 0x44535734
+    private const val MAGIC = 0x44535735
     const val BLOCK = 1 shl 20
     private const val HASH = 32
+    private const val WIRE_MAX = BLOCK + BLOCK / 8 + 256
 
     private const val REC_BLOCK = 1
     private const val REC_FILE_END = 2
     private const val REC_STREAM_END = 3
+
+    private const val FLAG_DEFLATE = 1
+    private const val FLAG_AES = 2
 
     private const val HAVE_NONE = 0
     private const val HAVE_ALL = 1
@@ -161,7 +176,20 @@ object Transfer {
     private const val ACK_OK = 1
     private const val ACK_BAD = 2
 
+    /** Answer to "this file is already on the phone". */
+    const val DUP_SKIP = 0
+    const val DUP_REPLACE = 1
+    const val DUP_KEEP_BOTH = 2
+
     class Item(val uri: Uri, val name: String, val size: Long)
+
+    class SendOptions(
+        val transferId: Long,
+        val senderName: String,
+        val secret: String,
+        val compress: Boolean,
+        val encrypt: Boolean
+    )
 
     /** Everything was handed to the link, but the receiver's "got it" never came back. */
     class NotConfirmed(why: String) : IOException("not confirmed: $why")
@@ -178,6 +206,15 @@ object Transfer {
     }
 
     private val END = Rec(null)
+
+    /** Formats that are already packed; compressing them only wastes time. */
+    private val PACKED = setOf(
+        "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "avif", "mp4", "mkv", "mov", "avi", "webm", "3gp",
+        "mp3", "aac", "m4a", "ogg", "opus", "flac", "zip", "rar", "7z", "gz", "xz", "bz2", "apk", "apks", "xapk",
+        "jar", "docx", "xlsx", "pptx", "odt", "epub"
+    )
+
+    fun worthCompressing(name: String) = name.substringAfterLast('.', "").lowercase(Locale.US) !in PACKED
 
     fun describe(ctx: Context, uris: List<Uri>): List<Item> {
         val out = ArrayList<Item>()
@@ -198,6 +235,16 @@ object Transfer {
             out.add(Item(uri, name, size))
         }
         return out
+    }
+
+    private fun key(secret: String, transferId: Long): SecretKeySpec {
+        val k = MessageDigest.getInstance("SHA-256").digest("DropSwift5:$secret:$transferId".toByteArray(Charsets.UTF_8))
+        return SecretKeySpec(k, "AES")
+    }
+
+    private fun nonce(file: Int, offset: Long): GCMParameterSpec {
+        val n = ByteBuffer.allocate(12).putInt(file).putLong(offset).array()
+        return GCMParameterSpec(128, n)
     }
 
     /** Fills the buffer completely unless the file ends first. Returns bytes read (0 at end). */
@@ -324,7 +371,14 @@ object Transfer {
 
     // ------------------------------------------------------------------ send
 
-    fun send(ctx: Context, sockets: List<Socket>, items: List<Item>, transferId: Long, p: Progress) {
+    /**
+     * [onPlan] is told how many bytes will really be sent, once the receiver has said what it already has
+     * (0 means the receiver already has everything, e.g. it is just checking for a new batch).
+     */
+    fun send(
+        ctx: Context, sockets: List<Socket>, items: List<Item>, opt: SendOptions, p: Progress,
+        onPlan: (Long) -> Unit = {}
+    ) {
         val n = sockets.size
         p.streams = n
         p.total = items.sumOf { it.size }
@@ -332,7 +386,8 @@ object Transfer {
         val control = DataInputStream(BufferedInputStream(sockets[0].getInputStream()))
         val first = outs[0]
         first.writeInt(MAGIC)
-        first.writeLong(transferId)
+        first.writeLong(opt.transferId)
+        first.writeUTF(opt.senderName.take(60))
         first.writeInt(items.size)
         first.writeLong(p.total)
         for (item in items) {
@@ -342,7 +397,7 @@ object Transfer {
         first.flush()
 
         // What does the receiver already have?
-        sockets[0].soTimeout = 60_000
+        sockets[0].soTimeout = 90_000
         val haveAll = BooleanArray(items.size)
         val haveBlocks = arrayOfNulls<BitSet>(items.size)
         var skipped = 0L
@@ -368,6 +423,10 @@ object Transfer {
         sockets[0].soTimeout = 0
         p.resumedBytes = skipped
         p.done.set(skipped)
+        onPlan(maxOf(0L, p.total - skipped))
+
+        val compressFile = BooleanArray(items.size) { opt.compress && worthCompressing(items[it].name) }
+        val aesKey = if (opt.encrypt) key(opt.secret, opt.transferId) else null
 
         val poolSize = n * 3 + 2
         val free = ArrayBlockingQueue<Rec>(poolSize)
@@ -438,8 +497,13 @@ object Transfer {
         }
 
         // Several threads push blocks over their own connection at the same time.
+        // Each one compresses / encrypts its own blocks, so that work also runs in parallel.
         val senders = outs.map { out ->
             thread(start = false, name = "ds-net") {
+                val deflater = Deflater(1)
+                val cbuf = ByteArray(WIRE_MAX)
+                val ebuf = ByteArray(WIRE_MAX + 32)
+                val cipher = if (aesKey != null) Cipher.getInstance("AES/GCM/NoPadding") else null
                 try {
                     while (true) {
                         val r = queue.take()
@@ -455,21 +519,47 @@ object Transfer {
                             out.writeLong(r.offset)
                             out.write(r.hash!!)
                             p.files.incrementAndGet()
-                        } else {
-                            val t0 = System.nanoTime()
-                            out.writeByte(REC_BLOCK)
-                            out.writeInt(r.file)
-                            out.writeLong(r.offset)
-                            out.writeInt(r.len)
-                            out.write(r.buf!!, 0, r.len)
-                            p.netNanos.addAndGet(System.nanoTime() - t0)
-                            p.done.addAndGet(r.len.toLong())
-                            free.put(r)
+                            continue
                         }
+                        var wire = r.buf!!
+                        var wireLen = r.len
+                        var flags = 0
+                        if (compressFile[r.file]) {
+                            deflater.reset()
+                            deflater.setInput(r.buf, 0, r.len)
+                            deflater.finish()
+                            val c = deflater.deflate(cbuf)
+                            // Only worth it when it saves at least 5%.
+                            if (deflater.finished() && c < r.len - r.len / 20) {
+                                wire = cbuf
+                                wireLen = c
+                                flags = flags or FLAG_DEFLATE
+                            }
+                        }
+                        if (cipher != null) {
+                            cipher.init(Cipher.ENCRYPT_MODE, aesKey, nonce(r.file, r.offset))
+                            wireLen = cipher.doFinal(wire, 0, wireLen, ebuf, 0)
+                            wire = ebuf
+                            flags = flags or FLAG_AES
+                        }
+                        val t0 = System.nanoTime()
+                        out.writeByte(REC_BLOCK)
+                        out.writeInt(r.file)
+                        out.writeLong(r.offset)
+                        out.writeInt(r.len)
+                        out.writeByte(flags)
+                        out.writeInt(wireLen)
+                        out.write(wire, 0, wireLen)
+                        p.netNanos.addAndGet(System.nanoTime() - t0)
+                        p.wireBytes.addAndGet(wireLen.toLong())
+                        p.done.addAndGet(r.len.toLong())
+                        free.put(r)
                     }
                 } catch (_: InterruptedException) {
                 } catch (e: Throwable) {
                     fail(e)
+                } finally {
+                    deflater.end()
                 }
             }
         }
@@ -498,7 +588,15 @@ object Transfer {
 
     // --------------------------------------------------------------- receive
 
-    fun receive(ctx: Context, sockets: List<Socket>, p: Progress, store: ResumeStore) {
+    /**
+     * Receives one batch. Returns how many files were newly received (0 = nothing new).
+     * [askDuplicates] is called (on this thread) with names already on the phone; it returns a DUP_ answer.
+     * [onNewData] is called once it is clear that real data is coming.
+     */
+    fun receive(
+        ctx: Context, sockets: List<Socket>, p: Progress, store: ResumeStore, secret: String,
+        askDuplicates: (List<String>) -> Int, onNewData: () -> Unit
+    ): Int {
         p.streams = sockets.size
         p.phase = ""
         p.verifyDone.set(0)
@@ -506,13 +604,14 @@ object Transfer {
         val control = ins[0]
         if (control.readInt() != MAGIC) throw IOException("Other phone has a different DropSwift version. Update both")
         val transferId = control.readLong()
+        store.senderName = control.readUTF()
         val count = control.readInt()
         if (count < 0 || count > 100_000) throw IOException("Bad file count")
         p.total = control.readLong()
         val names = ArrayList<String>(count)
         val sizes = ArrayList<Long>(count)
         for (i in 0 until count) {
-            names.add(cleanName(control.readUTF()))
+            names.add(Storage.cleanPath(control.readUTF()))
             sizes.add(control.readLong())
         }
 
@@ -524,6 +623,35 @@ object Transfer {
             store.state = state
         }
         val files = state.files
+
+        // Files already received earlier in this session (an earlier batch): skip quietly.
+        // Files already on the phone from before: ask once what to do.
+        if (!state.duplicatesChecked) {
+            state.duplicatesChecked = true
+            val dups = ArrayList<Pair<Int, Uri>>()
+            for ((i, f) in files.withIndex()) {
+                if (f.verified || f.uri != null) continue
+                val earlier = store.received["${names[i]}|${sizes[i]}"]
+                if (earlier != null) {
+                    f.uri = earlier
+                    f.verified = true
+                    f.skipped = true
+                    continue
+                }
+                Storage.findExisting(ctx, names[i], sizes[i])?.let { dups.add(Pair(i, it)) }
+            }
+            if (dups.isNotEmpty()) {
+                when (askDuplicates(dups.map { names[it.first] })) {
+                    DUP_SKIP -> for ((i, uri) in dups) {
+                        files[i].uri = uri
+                        files[i].verified = true
+                        files[i].skipped = true
+                    }
+                    DUP_REPLACE -> for ((_, uri) in dups) Storage.remove(ctx, uri)
+                    else -> {}
+                }
+            }
+        }
 
         // Tell the sender what we already have.
         val reply = DataOutputStream(BufferedOutputStream(sockets[0].getOutputStream(), 64 * 1024))
@@ -548,8 +676,10 @@ object Transfer {
         p.resumedBytes = already
         p.done.set(already)
         p.files.set(files.count { it.verified })
-        p.verified.set(files.count { it.verified })
+        p.verified.set(0)
+        if (files.any { !it.verified }) onNewData()
 
+        val aesKey = key(secret, transferId)
         val error = AtomicReference<Throwable?>(null)
 
         fun fail(e: Throwable) {
@@ -563,7 +693,7 @@ object Transfer {
                 if (f.channel == null && !f.verified) {
                     var uri = f.uri
                     if (uri == null) {
-                        uri = newDownload(ctx, f.name)
+                        uri = Storage.create(ctx, f.name)
                         f.uri = uri
                     }
                     val pfd = ctx.contentResolver.openFileDescriptor(uri, "rw")
@@ -578,7 +708,7 @@ object Transfer {
             // Caller holds the lock on f.
             if (f.complete || f.expected < 0) return
             val needed = ((f.expected + BLOCK - 1) / BLOCK).toInt()
-            if (f.blocks.cardinality() >= needed && f.blocks.nextClearBit(0) >= needed) {
+            if (f.blocks.nextClearBit(0) >= needed) {
                 f.complete = true
                 ResumeState.closeFile(f)
                 p.files.incrementAndGet()
@@ -589,49 +719,84 @@ object Transfer {
             thread(name = "ds-net") {
                 try {
                     val buf = ByteArray(BLOCK)
-                    while (true) {
-                        val t0 = System.nanoTime()
-                        val kind = inp.readUnsignedByte()
-                        if (kind == REC_STREAM_END) break
-                        if (kind == REC_FILE_END) {
+                    val wbuf = ByteArray(WIRE_MAX + 32)
+                    val dbuf = ByteArray(WIRE_MAX + 32)
+                    val inflater = Inflater()
+                    var cipher: Cipher? = null
+                    try {
+                        while (true) {
+                            val t0 = System.nanoTime()
+                            val kind = inp.readUnsignedByte()
+                            if (kind == REC_STREAM_END) break
+                            if (kind == REC_FILE_END) {
+                                val fi = inp.readInt()
+                                val length = inp.readLong()
+                                val hash = ByteArray(HASH)
+                                inp.readFully(hash)
+                                if (fi < 0 || fi >= files.size || length < 0) throw IOException("Bad file record")
+                                val f = files[fi]
+                                ensureOpen(f)
+                                synchronized(f) {
+                                    f.expected = length
+                                    f.hash = hash
+                                    checkComplete(f)
+                                }
+                                continue
+                            }
+                            if (kind != REC_BLOCK) throw IOException("Bad record")
                             val fi = inp.readInt()
-                            val length = inp.readLong()
-                            val hash = ByteArray(HASH)
-                            inp.readFully(hash)
-                            if (fi < 0 || fi >= files.size || length < 0) throw IOException("Bad file record")
+                            val offset = inp.readLong()
+                            val len = inp.readInt()
+                            val flags = inp.readUnsignedByte()
+                            val wireLen = inp.readInt()
+                            if (fi < 0 || fi >= files.size || offset < 0 || offset % BLOCK != 0L || len <= 0 ||
+                                len > BLOCK || wireLen <= 0 || wireLen > WIRE_MAX + 32
+                            ) {
+                                throw IOException("Bad data block")
+                            }
+                            inp.readFully(wbuf, 0, wireLen)
+                            val t1 = System.nanoTime()
+                            p.netNanos.addAndGet(t1 - t0)
+                            p.wireBytes.addAndGet(wireLen.toLong())
+
+                            var data = wbuf
+                            var dataLen = wireLen
+                            if (flags and FLAG_AES != 0) {
+                                val c = cipher ?: Cipher.getInstance("AES/GCM/NoPadding").also { cipher = it }
+                                c.init(Cipher.DECRYPT_MODE, aesKey, nonce(fi, offset))
+                                dataLen = try {
+                                    c.doFinal(data, 0, dataLen, dbuf, 0)
+                                } catch (e: Exception) {
+                                    throw IOException("integrity failed: encrypted block did not open")
+                                }
+                                data = dbuf
+                            }
+                            if (flags and FLAG_DEFLATE != 0) {
+                                inflater.reset()
+                                inflater.setInput(data, 0, dataLen)
+                                val got = inflater.inflate(buf, 0, len)
+                                if (got != len || !inflater.finished()) throw IOException("Bad compressed block")
+                            } else {
+                                if (dataLen != len) throw IOException("Bad data block")
+                                System.arraycopy(data, 0, buf, 0, len)
+                            }
+
                             val f = files[fi]
+                            p.file = f.name
                             ensureOpen(f)
+                            val ch = synchronized(f) { f.channel } ?: throw IOException("File already closed: ${f.name}")
+                            val bb = ByteBuffer.wrap(buf, 0, len)
+                            var pos = offset
+                            while (bb.hasRemaining()) pos += ch.write(bb, pos)
+                            p.diskNanos.addAndGet(System.nanoTime() - t1)
+                            p.done.addAndGet(len.toLong())
                             synchronized(f) {
-                                f.expected = length
-                                f.hash = hash
+                                f.blocks.set((offset / BLOCK).toInt())
                                 checkComplete(f)
                             }
-                            continue
                         }
-                        if (kind != REC_BLOCK) throw IOException("Bad record")
-                        val fi = inp.readInt()
-                        val offset = inp.readLong()
-                        val len = inp.readInt()
-                        if (fi < 0 || fi >= files.size || offset < 0 || offset % BLOCK != 0L || len <= 0 || len > BLOCK) {
-                            throw IOException("Bad data block")
-                        }
-                        inp.readFully(buf, 0, len)
-                        val t1 = System.nanoTime()
-                        p.netNanos.addAndGet(t1 - t0)
-
-                        val f = files[fi]
-                        p.file = f.name
-                        ensureOpen(f)
-                        val ch = synchronized(f) { f.channel } ?: throw IOException("File already closed: ${f.name}")
-                        val bb = ByteBuffer.wrap(buf, 0, len)
-                        var pos = offset
-                        while (bb.hasRemaining()) pos += ch.write(bb, pos)
-                        p.diskNanos.addAndGet(System.nanoTime() - t1)
-                        p.done.addAndGet(len.toLong())
-                        synchronized(f) {
-                            f.blocks.set((offset / BLOCK).toInt())
-                            checkComplete(f)
-                        }
+                    } finally {
+                        inflater.end()
                     }
                 } catch (e: Throwable) {
                     fail(e)
@@ -653,6 +818,7 @@ object Transfer {
         p.phase = "verify"
         val bad = ArrayList<String>()
         val buf = ByteArray(BLOCK)
+        var newFiles = 0
         for (f in files) {
             if (f.verified) continue
             val uri = f.uri ?: continue
@@ -669,19 +835,15 @@ object Transfer {
                 }
             }
             if (length == f.expected && md.digest().contentEquals(f.hash)) {
-                val v = ContentValues()
-                v.put(MediaStore.Downloads.IS_PENDING, 0)
-                ctx.contentResolver.update(uri, v, null, null)
+                Storage.finish(ctx, uri)
                 f.verified = true
+                newFiles++
                 p.verified.incrementAndGet()
             } else {
                 // Throw this file away; on the next try only it is sent again.
                 bad.add(f.name)
                 synchronized(f) {
-                    try {
-                        ctx.contentResolver.delete(uri, null, null)
-                    } catch (_: Exception) {
-                    }
+                    Storage.remove(ctx, uri)
                     f.uri = null
                     f.blocks.clear()
                     f.complete = false
@@ -703,6 +865,11 @@ object Transfer {
         }
         os.write(ACK_OK)
         os.flush()
+        // Remember this batch so a later batch from the same sender skips it.
+        for ((i, f) in files.withIndex()) {
+            val u = f.uri
+            if (f.verified && u != null) store.received["${names[i]}|${sizes[i]}"] = u
+        }
         // Keep the link up until the sender has read the answer and hung up (at most 10 s).
         try {
             sockets[0].soTimeout = 10_000
@@ -711,19 +878,11 @@ object Transfer {
         } catch (_: Exception) {
         }
         store.state = null
+        return newFiles
     }
 
-    fun cleanName(raw: String): String {
-        val n = raw.replace('/', '_').replace('\\', '_').replace("\u0000", "").trim()
-        return if (n.isEmpty() || n == "." || n == "..") "file" else n.take(200)
-    }
+    /** Kept for internet mode and browser upload. */
+    fun cleanName(raw: String): String = Storage.cleanPath(raw)
 
-    fun newDownload(ctx: Context, name: String): Uri {
-        val v = ContentValues()
-        v.put(MediaStore.Downloads.DISPLAY_NAME, name)
-        v.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/DropSwift")
-        v.put(MediaStore.Downloads.IS_PENDING, 1)
-        return ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v)
-            ?: throw IOException("Cannot create $name in Downloads")
-    }
+    fun newDownload(ctx: Context, name: String): Uri = Storage.create(ctx, name)
 }

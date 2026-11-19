@@ -42,6 +42,10 @@ class TransferService : Service() {
     companion object {
         private const val ID = 4780
         private const val CHANNEL = "transfer"
+        private const val CHANNEL_SILENT = "transfer_silent"
+
+        /** Silent mode: the notification stays minimised with no sound or icon in the status bar. */
+        @Volatile var silent = false
         private const val EXTRA_TEXT = "text"
 
         @Volatile var running = false
@@ -81,6 +85,11 @@ class TransferService : Service() {
                     NotificationChannel(CHANNEL, "Transfers", NotificationManager.IMPORTANCE_LOW)
                 )
             }
+            if (nm.getNotificationChannel(CHANNEL_SILENT) == null) {
+                nm.createNotificationChannel(
+                    NotificationChannel(CHANNEL_SILENT, "Transfers (silent)", NotificationManager.IMPORTANCE_MIN)
+                )
+            }
         }
 
         private fun build(ctx: Context, text: String, pct: Int): Notification {
@@ -92,7 +101,7 @@ class TransferService : Service() {
             val open = PendingIntent.getActivity(
                 ctx, 0, launch, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
             )
-            val b = Notification.Builder(ctx, CHANNEL)
+            val b = Notification.Builder(ctx, if (silent) CHANNEL_SILENT else CHANNEL)
                 .setSmallIcon(R.drawable.ic_notify)
                 .setContentTitle("DropSwift")
                 .setContentText(text)

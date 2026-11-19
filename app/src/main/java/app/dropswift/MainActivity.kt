@@ -27,6 +27,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.StatFs
 import android.os.SystemClock
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.Settings
 import android.text.InputType
@@ -62,6 +63,9 @@ import java.security.SecureRandom
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import org.json.JSONArray
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -120,6 +124,27 @@ class MainActivity : Activity() {
     private var historyIn = true
     private lateinit var btnPause: Button
     private lateinit var doneBox: LinearLayout
+    private lateinit var qualityView: TextView
+    private lateinit var btnAddMore: Button
+
+    // Queue: the files being shared now; a new id each time files are added.
+    private class HostBatch(val items: List<Transfer.Item>, val id: Long)
+    @Volatile private var batch = HostBatch(emptyList(), 0L)
+    private var pickedItems: List<Transfer.Item>? = null
+    private var addingMore = false
+    private var autoMode = false
+    private var hostBand = 0
+    private var autoSwitched = false
+    private val peerBreaks = AtomicInteger(0)
+    @Volatile private var serversUp = false
+    private var linkFreq = 0
+    private var joinSsid = ""
+    private var joinPass = ""
+    private var lanJoin = false
+
+    private val settings by lazy { getSharedPreferences("settings", Context.MODE_PRIVATE) }
+    private fun flag(k: String) = settings.getBoolean(k, false)
+    private fun setFlag(k: String, v: Boolean) = settings.edit().putBoolean(k, v).apply()
 
     private var progress = Progress()
     private var startedAt = 0L
@@ -341,6 +366,7 @@ class MainActivity : Activity() {
         btnSendSelected.visibility = View.GONE
         btnSendSelected.setOnClickListener {
             if (!active && selected.isNotEmpty()) {
+                pickedItems = null
                 pickedUris = ArrayList(selected.keys)
                 chooseSendWay()
             }
@@ -366,6 +392,19 @@ class MainActivity : Activity() {
         altView.setOnClickListener { toggleBrowserQr() }
         root.addView(altView, wide)
 
+        btnAddMore = button("+ Aur file jodo", Color.parseColor("#263650"), Color.WHITE)
+        btnAddMore.textSize = 15f
+        btnAddMore.visibility = View.GONE
+        btnAddMore.setOnClickListener {
+            if (hosting && !hostReceiveOnly) {
+                addingMore = true
+                showPicker()
+            }
+        }
+        val addParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46))
+        addParams.topMargin = dp(6)
+        root.addView(btnAddMore, addParams)
+
         bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
         bar.max = 1000
         bar.visibility = View.GONE
@@ -375,6 +414,9 @@ class MainActivity : Activity() {
         speedView = text(34f, Color.parseColor("#00E68A"), true)
         speedView.setOnClickListener { shareTheCode() }
         root.addView(speedView, wide)
+
+        qualityView = text(13f, Color.parseColor("#9AA9BD"), true)
+        root.addView(qualityView, wide)
 
         detailView = text(14f, Color.parseColor("#9AA9BD"))
         root.addView(detailView, wide)
@@ -413,6 +455,11 @@ class MainActivity : Activity() {
         historyLink.setPadding(dp(8), dp(8), dp(8), dp(4))
         historyLink.setOnClickListener { showHistory() }
         root.addView(historyLink, wide)
+        val settingsLink = text(13f, Color.parseColor("#06B6D4"), true)
+        settingsLink.text = "Settings"
+        settingsLink.setPadding(dp(8), dp(4), dp(8), dp(4))
+        settingsLink.setOnClickListener { showSettings() }
+        root.addView(settingsLink, wide)
         root.addView(logToggle, wide)
         logView = TextView(this)
         logView.visibility = View.GONE
@@ -823,29 +870,257 @@ class MainActivity : Activity() {
 
     private fun onSendClicked() {
         if (active) return
+        addingMore = false
+        showPicker()
+    }
+
+    /** What kind of files? (also used by "+ Aur file jodo" while sharing) */
+    private fun showPicker() {
         AlertDialog.Builder(this)
-            .setTitle("Kya bhejna hai?")
-            .setItems(arrayOf("Photos aur videos", "Koi bhi file")) { _, which ->
-                if (which == 0) pickMedia() else pickFiles()
+            .setTitle(if (addingMore) "Aur kya jodna hai?" else "Kya bhejna hai?")
+            .setItems(
+                arrayOf(
+                    "Photos aur videos",
+                    "Documents (PDF, Word, Excel, PPT, text)",
+                    "Music / audio",
+                    "Apps (APK files)",
+                    "Koi bhi file",
+                    "Poora folder"
+                )
+            ) { _, which ->
+                when (which) {
+                    0 -> pickMedia()
+                    1 -> pickTyped(
+                        arrayOf(
+                            "application/pdf", "application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                            "application/vnd.oasis.opendocument.text", "application/rtf", "text/*"
+                        )
+                    )
+                    2 -> pickTyped(arrayOf("audio/*"))
+                    3 -> pickTyped(arrayOf("application/vnd.android.package-archive"))
+                    4 -> pickFiles()
+                    else -> pickFolder()
+                }
+            }
+            .setOnCancelListener { addingMore = false }
+            .show()
+    }
+
+    private fun pickTyped(mimes: Array<String>) {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
+        i.addCategory(Intent.CATEGORY_OPENABLE)
+        i.type = "*/*"
+        i.putExtra(Intent.EXTRA_MIME_TYPES, mimes)
+        i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        try {
+            startActivityForResult(i, REQ_PICK)
+        } catch (e: Exception) {
+            pickFiles()
+        }
+    }
+
+    private fun pickFolder() {
+        try {
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_FOLDER)
+        } catch (e: Exception) {
+            say(phoneFault("folder chunne wali screen nahi khul rahi (${e.message})."))
+        }
+    }
+
+    /** Every file inside a picked folder, with its path ("Trip/Day 1/a.jpg"). Runs on a worker thread. */
+    private fun listFolder(tree: Uri): List<Transfer.Item> {
+        val out = ArrayList<Transfer.Item>()
+        val rootId = DocumentsContract.getTreeDocumentId(tree)
+        var rootName = rootId.substringAfterLast('/').substringAfter(':').ifEmpty { "Folder" }
+        try {
+            contentResolver.query(
+                DocumentsContract.buildDocumentUriUsingTree(tree, rootId),
+                arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null
+            )?.use { c -> if (c.moveToFirst()) c.getString(0)?.let { rootName = it } }
+        } catch (_: Exception) {
+        }
+        fun walk(docId: String, path: String, depth: Int) {
+            if (depth > 8 || out.size >= 20000) return
+            val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, docId)
+            contentResolver.query(
+                children,
+                arrayOf(
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE,
+                    DocumentsContract.Document.COLUMN_SIZE
+                ),
+                null, null, null
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    val id = c.getString(0) ?: continue
+                    val name = c.getString(1) ?: continue
+                    if (c.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR) {
+                        walk(id, "$path/$name", depth + 1)
+                    } else {
+                        out.add(Transfer.Item(DocumentsContract.buildDocumentUriUsingTree(tree, id), "$path/$name", c.getLong(3)))
+                    }
+                }
+            }
+        }
+        walk(rootId, rootName, 0)
+        return out
+    }
+
+    /** Queue: add files while already sharing. Phones already connected get only the new ones. */
+    private fun appendItems(newItems: List<Transfer.Item>) {
+        addingMore = false
+        if (!hosting || newItems.isEmpty()) return
+        val known = batch.items.map { it.uri }.toHashSet()
+        val merged = batch.items + newItems.filter { it.uri !in known }
+        setBatch(merged)
+        web?.items = merged
+        say("${merged.size - known.size} file aur jod di (kul ${merged.size}). Jude hue phone ko sirf nayi files jayengi, naye phone sab payenge.")
+    }
+
+    private fun setBatch(items: List<Transfer.Item>) {
+        hostItems = items
+        batch = HostBatch(items, SecureRandom().nextLong())
+    }
+
+    /** Files chosen for sending: a folder's list, or the picked files. Runs on a worker thread. */
+    private fun chosenItems(uris: List<Uri>): List<Transfer.Item> = pickedItems ?: Transfer.describe(this, uris)
+
+    private fun onReceiveClicked() {
+        if (active) return
+        val recents = recentSenders()
+        val labels = ArrayList<String>()
+        labels.add("Paas mein - uska QR scan karo")
+        for (r in recents) labels.add("↻ ${r.getString("n")} se dobara (bina QR)")
+        labels.add("iPhone ya laptop se lena (browser se)")
+        labels.add("Bahut door - internet code se")
+        AlertDialog.Builder(this)
+            .setTitle("Bhejne wala phone kahan hai?")
+            .setItems(labels.toTypedArray()) { _, which ->
+                when {
+                    which == 0 -> ensureNearby { openScanner() }
+                    which <= recents.size -> {
+                        val r = recents[which - 1]
+                        say("${r.getString("n")} se jud raha hoon. Us phone pe Send files karke QR wali screen khuli honi chahiye.")
+                        ensureNearby { joinNearby(r.getString("s"), r.getString("p")) }
+                    }
+                    which == recents.size + 1 -> ensureNearby { startHosting(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ, true) }
+                    else -> startInternetReceive()
+                }
             }
             .show()
     }
 
-    private fun onReceiveClicked() {
-        if (active) return
+    /** Phones this phone received from before; tap one to join it again without a QR. */
+    private fun recentSenders(): List<JSONObject> {
+        val out = ArrayList<JSONObject>()
+        try {
+            val arr = JSONArray(settings.getString("recents", "[]"))
+            for (i in 0 until arr.length()) out.add(arr.getJSONObject(i))
+        } catch (_: Exception) {
+        }
+        return out
+    }
+
+    private fun rememberSender(ssid: String, pass: String, name: String) {
+        if (ssid.isEmpty()) return
+        val list = recentSenders().filter { it.optString("s") != ssid }.take(4)
+        val arr = JSONArray()
+        arr.put(JSONObject().put("s", ssid).put("p", pass).put("n", name.ifEmpty { "Pichhla phone" }).put("t", System.currentTimeMillis()))
+        for (o in list) arr.put(o)
+        settings.edit().putString("recents", arr.toString()).apply()
+    }
+
+    /** This phone's own link name and password; the same every time, so recent phones can join without a QR. */
+    private fun myCreds(): Pair<String, String> {
+        var ssid = settings.getString("my_ssid", null)
+        var pass = settings.getString("my_pass", null)
+        if (ssid == null || pass == null) {
+            ssid = "DIRECT-DS-" + randomText(5)
+            pass = randomText(12)
+            settings.edit().putString("my_ssid", ssid).putString("my_pass", pass).apply()
+        }
+        return Pair(ssid, pass)
+    }
+
+    private fun autoBand(): Int {
+        return try {
+            val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            if (wifi.is5GHzBandSupported) WifiP2pConfig.GROUP_OWNER_BAND_5GHZ else WifiP2pConfig.GROUP_OWNER_BAND_2GHZ
+        } catch (_: Throwable) {
+            WifiP2pConfig.GROUP_OWNER_BAND_AUTO
+        }
+    }
+
+    /** Auto mode: if the 5 GHz link keeps breaking, move everyone to the longer-reaching 2.4 GHz link. */
+    private fun autoSwitchTo24(gen: Int) {
+        if (!autoMode || autoSwitched || !hosting || hostLan || hostBand != WifiP2pConfig.GROUP_OWNER_BAND_5GHZ) return
+        autoSwitched = true
+        hostBand = WifiP2pConfig.GROUP_OWNER_BAND_2GHZ
+        say("Link baar-baar toot raha tha, isliye maine door tak chalne wala 2.4 GHz link bana diya. Jude hue phone apne-aap wapas judenge, jahan ruke the wahin se (speed kam hogi).")
+        log("auto mode: switching link to 2.4 GHz")
+        leaveGroup { if (gen == generation) createGroup(gen, hostSsid, hostPass, WifiP2pConfig.GROUP_OWNER_BAND_2GHZ) }
+    }
+
+    private fun showSettings() {
+        val recents = recentSenders()
+        fun onOff(b: Boolean) = if (b) "ON" else "OFF"
+        val items = arrayOf(
+            "Files kahan save hon: ${Storage.label(this)}",
+            "Compression (kamzor link pe chhota karke bhejo): ${onOff(flag("compress"))}",
+            "Encryption (extra suraksha): ${onOff(flag("encrypt"))}",
+            "Silent mode (chhupa notification, bina vibration): ${onOff(flag("silent"))}",
+            "Mera DropSwift password badlo",
+            "Yaad rakhe phone bhool jao (${recents.size})"
+        )
         AlertDialog.Builder(this)
-            .setTitle("Bhejne wala phone kahan hai?")
-            .setItems(
-                arrayOf(
-                    "Paas mein - uska QR scan karo",
-                    "iPhone ya laptop se lena (browser se)",
-                    "Bahut door - internet code se"
-                )
-            ) { _, which ->
+            .setTitle("Settings")
+            .setItems(items) { _, which ->
                 when (which) {
-                    0 -> ensureNearby { openScanner() }
-                    1 -> ensureNearby { startHosting(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ, true) }
-                    else -> startInternetReceive()
+                    0 -> AlertDialog.Builder(this)
+                        .setTitle("Files kahan save hon?")
+                        .setItems(arrayOf("Download/DropSwift (default)", "Apna folder chuno")) { _, w ->
+                            if (w == 0) {
+                                Storage.setTree(this, null)
+                                say("Ab files Download/DropSwift mein save hongi.")
+                            } else {
+                                try {
+                                    startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_SAVE_TREE)
+                                } catch (e: Exception) {
+                                    say(phoneFault("folder chunne wali screen nahi khul rahi."))
+                                }
+                            }
+                        }
+                        .show()
+                    1 -> {
+                        setFlag("compress", !flag("compress"))
+                        say(if (flag("compress")) "Compression ON. Text, documents jaisi files chhoti hoke jayengi. Photo/video pe asar nahi (woh pehle se dabi hoti hain)." else "Compression OFF.")
+                    }
+                    2 -> {
+                        setFlag("encrypt", !flag("encrypt"))
+                        say(if (flag("encrypt")) "Encryption ON. Har tukda AES-256 se band hoke jayega (paas wale aur hotspot mode mein). Link pehle se password se surakshit hai; yeh upar se ek aur parat hai." else "Encryption OFF. Wi-Fi link phir bhi password se surakshit hai.")
+                    }
+                    3 -> {
+                        setFlag("silent", !flag("silent"))
+                        say(if (flag("silent")) "Silent mode ON. Notification chhupa rahega aur vibration nahi hoga. Android ka niyam hai ki background transfer ke liye notification poori tarah hat nahi sakta." else "Silent mode OFF.")
+                    }
+                    4 -> AlertDialog.Builder(this)
+                        .setTitle("Password badlun?")
+                        .setMessage("Jin phone ne pehle tumhara QR scan kiya hai, woh ab bina QR nahi jud payenge. Naya QR scan karna padega.")
+                        .setPositiveButton("Haan, badlo") { _, _ ->
+                            settings.edit().remove("my_ssid").remove("my_pass").apply()
+                            myCreds()
+                            say("Naya password ban gaya. Purane jude phone ab bina QR nahi jud sakte.")
+                        }
+                        .setNegativeButton("Nahi", null)
+                        .show()
+                    else -> {
+                        settings.edit().remove("recents").apply()
+                        say("Yaad rakhe phone bhool gaya.")
+                    }
                 }
             }
             .show()
@@ -858,16 +1133,18 @@ class MainActivity : Activity() {
             .setTitle("Lene wale kahan hain?")
             .setItems(
                 arrayOf(
-                    "Paas mein - QR dikhao (sabse tez, kai phone ek saath)",
-                    "20 m tak - QR dikhao (dheema, door tak)",
-                    "Hotspot ya same Wi-Fi se - QR dikhao (naya, test)",
+                    "Auto - app khud chunega (QR dikhao)",
+                    "Paas mein - sabse tez (5 GHz)",
+                    "20 m tak - dheema, door tak (2.4 GHz)",
+                    "Hotspot ya same Wi-Fi se",
                     "Bahut door - internet code se"
                 )
             ) { _, which ->
                 when (which) {
-                    0 -> ensureNearby { startHosting(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ) }
-                    1 -> ensureNearby { startHosting(WifiP2pConfig.GROUP_OWNER_BAND_2GHZ) }
-                    2 -> startLanHosting()
+                    0 -> ensureNearby { startHosting(autoBand(), auto = true) }
+                    1 -> ensureNearby { startHosting(WifiP2pConfig.GROUP_OWNER_BAND_5GHZ) }
+                    2 -> ensureNearby { startHosting(WifiP2pConfig.GROUP_OWNER_BAND_2GHZ) }
+                    3 -> startLanHosting()
                     else -> askCode()
                 }
             }
@@ -981,8 +1258,47 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         log("back from screen $requestCode, result $resultCode")
+        if (requestCode == REQ_SAVE_TREE) {
+            val t = data?.data
+            if (resultCode == RESULT_OK && t != null) {
+                Storage.setTree(this, t)
+                say("Ab files yahan save hongi: ${Storage.label(this)}")
+            }
+            return
+        }
+        if (requestCode == REQ_FOLDER) {
+            val t = data?.data
+            if (resultCode != RESULT_OK || t == null) {
+                addingMore = false
+                say("Koi folder nahi chuna.")
+                return
+            }
+            say("Folder ki files gin raha hoon...")
+            thread(name = "ds-folder") {
+                val items = try {
+                    listFolder(t)
+                } catch (e: Throwable) {
+                    emptyList()
+                }
+                ui.post {
+                    if (items.isEmpty()) {
+                        addingMore = false
+                        say("Is folder mein koi file nahi mili.")
+                    } else if (addingMore) {
+                        appendItems(items)
+                    } else {
+                        pickedItems = items
+                        pickedUris = items.map { it.uri }
+                        say("Folder mein ${items.size} file hain (${size(items.sumOf { it.size })}). Ab batao lene wale kahan hain.")
+                        chooseSendWay()
+                    }
+                }
+            }
+            return
+        }
         if (requestCode == REQ_PICK) {
             if (resultCode != RESULT_OK || data == null) {
+                addingMore = false
                 say("Koi file nahi chuni. Jab ready ho, dobara button dabao.")
                 return
             }
@@ -994,6 +1310,14 @@ class MainActivity : Activity() {
                 data.data?.let { list.add(it) }
             }
             if (list.isEmpty()) return
+            if (addingMore) {
+                thread(name = "ds-describe") {
+                    val items = Transfer.describe(this, list)
+                    ui.post { appendItems(items) }
+                }
+                return
+            }
+            pickedItems = null
             pickedUris = list
             say("${list.size} file chuni. Ab batao lene wale kahan hain.")
             chooseSendWay()
@@ -1065,21 +1389,22 @@ class MainActivity : Activity() {
 
     // ---------------------------------------------- nearby: sender is the host
 
-    private fun startHosting(band: Int, receiveOnly: Boolean = false) {
+    private fun startHosting(band: Int, receiveOnly: Boolean = false, auto: Boolean = false) {
         val uris = if (receiveOnly) emptyList() else pickedUris
         if (!receiveOnly && uris.isEmpty()) return
         val gen = beginSession()
         hosting = true
         hostReceiveOnly = receiveOnly
+        autoMode = auto
+        hostBand = band
         showTip(phoneCheck(false))
         say("Link bana raha hoon...")
         thread(name = "ds-describe") {
-            val items = Transfer.describe(this, uris)
+            val items = if (receiveOnly) emptyList() else chosenItems(uris)
             ui.post {
                 if (gen != generation) return@post
-                hostItems = items
-                val ssid = "DIRECT-DS-" + randomText(5)
-                val pass = randomText(12)
+                setBatch(items)
+                val (ssid, pass) = myCreds()
                 val routerFreq = routerFrequency()
                 // On the router's own 5 GHz channel the Wi-Fi chip does not have to keep hopping
                 // between two channels, which can halve the speed.
@@ -1129,6 +1454,11 @@ class MainActivity : Activity() {
     }
 
     private fun onHostReady(gen: Int, ssid: String, pass: String) {
+        if (serversUp) {
+            // Link made again (auto mode switched band): servers are still running.
+            showLinkBand(gen, 0)
+            return
+        }
         hostSsid = ssid
         hostPass = pass
         showingUrlQr = false
@@ -1136,6 +1466,8 @@ class MainActivity : Activity() {
         altView.text = "iPhone ya laptop pe lena hai? Yahan dabao"
         altView.visibility = View.VISIBLE
         btnCancel.text = "Band karo"
+        if (!hostReceiveOnly) btnAddMore.visibility = View.VISIBLE
+        if (autoMode) log("auto mode: link on band $hostBand")
         if (hostReceiveOnly) {
             say("Ready! iPhone: 1) camera se yeh QR scan karke Wi-Fi Join karo. 2) Neeche 'iPhone ya laptop' dabao aur doosra QR scan karo. 3) Safari ke page pe 'Is phone ko file bhejo' se file chuno.")
         } else {
@@ -1179,10 +1511,10 @@ class MainActivity : Activity() {
         showTip(phoneCheck(false))
         say("Tayyar kar raha hoon...")
         thread(name = "ds-describe") {
-            val items = Transfer.describe(this, uris)
+            val items = chosenItems(uris)
             ui.post {
                 if (gen != generation) return@post
-                hostItems = items
+                setBatch(items)
                 val secret = randomText(12)
                 hostPass = secret
                 hostSsid = ""
@@ -1193,6 +1525,7 @@ class MainActivity : Activity() {
                 altView.text = "Laptop ya iPhone (isi network pe)? Yahan dabao"
                 altView.visibility = View.VISIBLE
                 btnCancel.text = "Band karo"
+                btnAddMore.visibility = View.VISIBLE
                 linkView.text = "Hotspot / same Wi-Fi mode: ${ips.joinToString(", ")}"
                 log("lan host on ${ips.joinToString(",")}")
                 say("Ready! Lene wala phone pehle isi hotspot ya Wi-Fi se juda ho. Phir uspe DropSwift → Receive → 'Paas mein' → yeh QR scan karo.")
@@ -1202,7 +1535,7 @@ class MainActivity : Activity() {
     }
 
     private fun startServers(gen: Int, pass: String) {
-        hostTransferId = SecureRandom().nextLong()
+        serversUp = true
         holdWifi()
         startHostTicker(gen)
 
@@ -1240,56 +1573,74 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Runs on its own thread for each receiver that joins (or joins again after a break). */
+    /** Runs on its own thread for each receiver that joins (or joins again after a break, or checks for new files). */
     private fun servePeer(gen: Int, id: Long, name: String, sockets: List<Socket>) {
         val peer = synchronized(peers) {
             peers.firstOrNull { it.id == id } ?: Peer(id, name).also { peers.add(it) }
         }
+        val b = batch
+        val opt = Transfer.SendOptions(
+            b.id, "${Build.MANUFACTURER} ${Build.MODEL}", hostPass, flag("compress"), flag("encrypt")
+        )
         val p = Progress()
         val my = synchronized(peer) {
             peer.attempt++
-            peer.p = p
-            peer.done = false
-            peer.ok = false
-            peer.status = "bhej raha hoon"
             peer.attempt
         }
-        val again = my > 1
-        log("receiver ${if (again) "joined again" else "joined"}: $name")
-        ui.post {
-            if (gen == generation) say(
-                if (again) "$name wapas juda. Jahan ruka tha wahin se bhej raha hoon..."
-                else "$name jud gaya, bhej raha hoon... Aur phone bhi scan kar sakte hain."
-            )
-        }
+        val wasOk = peer.ok
+        var real = false
         val t0 = SystemClock.elapsedRealtime()
         var ok = false
-        var status: String
+        var status = ""
         try {
-            Transfer.send(this, sockets, hostItems, hostTransferId, p)
+            Transfer.send(this, sockets, b.items, opt, p) { newBytes ->
+                // A phone that already has everything is only checking for new files: stay quiet.
+                if (newBytes > 0 || !wasOk) {
+                    real = true
+                    synchronized(peer) {
+                        if (peer.attempt == my) {
+                            peer.p = p
+                            peer.done = false
+                            peer.ok = false
+                            peer.status = "bhej raha hoon"
+                        }
+                    }
+                    val again = my > 1
+                    log("receiver ${if (again) "again" else "joined"}: $name, ${size(newBytes)} to send")
+                    ui.post {
+                        if (gen == generation) say(
+                            if (wasOk) "$name ko nayi files bhej raha hoon..."
+                            else if (again) "$name wapas juda. Jahan ruka tha wahin se bhej raha hoon..."
+                            else "$name jud gaya, bhej raha hoon... Aur phone bhi scan kar sakte hain."
+                        )
+                    }
+                }
+            }
             ok = true
             status = "pahunch gayi, 100% match"
         } catch (e: Throwable) {
             status = diagnose(e)
-            log("receiver $name stopped: ${e.javaClass.simpleName}: ${e.message}")
+            if (real) log("receiver $name stopped: ${e.javaClass.simpleName}: ${e.message}")
         }
+        if (!real) return
         // A newer try from the same phone has taken over; let that one report.
         if (peer.attempt != my) return
         peer.ok = ok
         peer.status = status
         peer.done = true
+        if (!ok && peerBreaks.incrementAndGet() >= 2) ui.post { if (gen == generation) autoSwitchTo24(gen) }
         val secs = (SystemClock.elapsedRealtime() - t0) / 1000.0
         val dataSecs = p.dataNanos / 1e9
         val sent = p.done.get() - p.resumedBytes
         val avg = if (dataSecs > 0) sent / 1048576.0 / dataSecs else 0.0
         log(String.format(
-            Locale.US, "result %s: %s | %.1f MB/s while sending, %s sent in %.1f s (%s already there) (%.1f s total with receiver's check) | per connection: waited on Wi-Fi %.1f s, on storage %.1f s",
-            name, if (ok) "ok" else "stopped", avg, size(sent), dataSecs, size(p.resumedBytes), secs,
+            Locale.US, "result %s: %s | %.1f MB/s while sending, %s sent (%s on the wire) in %.1f s, %s already there, %.1f s total with check | per connection: Wi-Fi %.1f s, storage %.1f s",
+            name, if (ok) "ok" else "stopped", avg, size(sent), size(p.wireBytes.get()), dataSecs, size(p.resumedBytes), secs,
             p.netNanos.get() / 1e9 / p.streams, p.diskNanos.get() / 1e9 / p.streams
         ))
         History.add(
             applicationContext,
-            History.Entry(System.currentTimeMillis(), false, name, hostItems.size, p.total, avg, ok, status.take(120), "")
+            History.Entry(System.currentTimeMillis(), false, name, b.items.size, p.total, avg, ok, status.take(120), "")
         )
         ui.post { if (gen == generation) onPeerFinished() }
     }
@@ -1386,10 +1737,37 @@ class MainActivity : Activity() {
             val eta = if (emaSpeed > 0.3 && left > 0) etaText(left / 1048576.0 / emaSpeed) else ""
             if (eta.isNotEmpty()) detailView.text = detailView.text.toString() + "\nBaaki: $eta"
             val pct = if (total > 0) (done * 100 / total).toInt() else 0
+            if (emaSpeed > 0) showQuality(emaSpeed / running.size)
             notifyMaybe("Bhej raha hoon: ${running.size} phone, $pct%" + (if (eta.isNotEmpty()) ", $eta baaki" else ""), pct)
         } else {
             notifyMaybe("QR tayyar hai, lene wale ka intezaar", -1)
         }
+    }
+
+    /** Strong / Medium / Weak. Signal strength when on a hotspot or router; otherwise judged from speed. */
+    private fun showQuality(speed: Double) {
+        var rssi = 0
+        if (lanJoin || hostLan) {
+            try {
+                val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                rssi = wifi.connectionInfo?.rssi ?: 0
+            } catch (_: Throwable) {
+            }
+        }
+        val level: Int
+        val how: String
+        if (rssi in -100..-1) {
+            level = if (rssi >= -60) 2 else if (rssi >= -70) 1 else 0
+            how = "$rssi dBm"
+        } else {
+            val fast = linkFreq >= 4900 || (linkFreq == 0 && !hostLan)
+            level = if (speed >= (if (fast) 40.0 else 5.0)) 2 else if (speed >= (if (fast) 10.0 else 2.0)) 1 else 0
+            how = "speed se andaza"
+        }
+        val label = arrayOf("Weak", "Medium", "Strong")[level]
+        val color = arrayOf("#FF7A7A", "#FFCA69", "#00E68A")[level]
+        qualityView.text = "Link: $label ($how)"
+        qualityView.setTextColor(Color.parseColor(color))
     }
 
     private fun notifyMaybe(text: String, pct: Int) {
@@ -1427,12 +1805,18 @@ class MainActivity : Activity() {
             say("Yeh DropSwift ka QR nahi hai. Bhejne wale phone pe Send files → file chuno → 'Paas mein'. Jo QR aata hai woh scan karo.")
             return
         }
-        val ssid = wifi.first
-        val pass = wifi.second
+        joinNearby(wifi.first, wifi.second)
+    }
+
+    /** Joins a sender's Wi-Fi Direct link (from a QR or from the recent list). */
+    @SuppressLint("MissingPermission")
+    private fun joinNearby(ssid: String, pass: String) {
         val m = p2p
         val c = channel
         if (m == null || c == null) return
         val gen = beginSession()
+        joinSsid = ssid
+        joinPass = pass
         showTip(phoneCheck(true))
         say("Bhejne wale phone se jud raha hoon...")
 
@@ -1478,6 +1862,7 @@ class MainActivity : Activity() {
         val port = parts[2].trim().toIntOrNull() ?: Transfer.PORT
         val secret = parts[3].trim()
         val gen = beginSession()
+        lanJoin = true
         historyWho = "Hotspot / same Wi-Fi"
         showTip(phoneCheck(true))
         linkView.text = "Hotspot / same Wi-Fi mode"
@@ -1600,9 +1985,43 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Asks what to do with files already on the phone. Called on a worker thread; waits up to 25 s, then skips. */
+    private fun askDuplicates(names: List<String>): Int {
+        val latch = CountDownLatch(1)
+        var answer = Transfer.DUP_SKIP
+        ui.post {
+            val shown = names.take(5).joinToString("\n") + (if (names.size > 5) "\n...aur ${names.size - 5}" else "")
+            say("${names.size} file pehle se phone mein hain. Skip karun ya replace?")
+            try {
+                AlertDialog.Builder(this)
+                    .setTitle("${names.size} file pehle se hain")
+                    .setMessage("Same naam aur size:\n$shown\n\n25 second mein na chuna toh skip kar dunga.")
+                    .setPositiveButton("Skip karo") { _, _ ->
+                        answer = Transfer.DUP_SKIP
+                        latch.countDown()
+                    }
+                    .setNegativeButton("Replace karo") { _, _ ->
+                        answer = Transfer.DUP_REPLACE
+                        latch.countDown()
+                    }
+                    .setNeutralButton("Dono rakho") { _, _ ->
+                        answer = Transfer.DUP_KEEP_BOTH
+                        latch.countDown()
+                    }
+                    .setOnCancelListener { latch.countDown() }
+                    .show()
+            } catch (_: Throwable) {
+                latch.countDown()
+            }
+        }
+        latch.await(25, TimeUnit.SECONDS)
+        return answer
+    }
+
     /**
      * Receiver: join, receive, and if the link breaks, join again and continue where it stopped.
-     * Only after a first successful join; a sender that is never found fails straight away.
+     * After a batch it keeps checking for files the sender adds (queue) until the sender stops.
+     * A sender that is never found fails straight away.
      */
     private fun receiveLoop(
         gen: Int, port: Int, secret: String, firstOwner: InetAddress?, notFound: String,
@@ -1615,6 +2034,10 @@ class MainActivity : Activity() {
             var owner = firstOwner
             var tries = 0
             var started = false
+            var waiting = false
+            var batches = 0
+            var pollFails = 0
+            var endedQuietly = false
             var error: Throwable? = null
             while (gen == generation) {
                 try {
@@ -1624,6 +2047,7 @@ class MainActivity : Activity() {
                         track(c)
                         trackAttempt(c)
                     }
+                    pollFails = 0
                     if (!started) {
                         started = true
                         ui.post {
@@ -1632,12 +2056,30 @@ class MainActivity : Activity() {
                                 btnPause.visibility = View.VISIBLE
                             }
                         }
-                    } else {
+                    } else if (!waiting && tries > 0) {
                         ui.post { if (gen == generation) say("Wapas jud gaya. Jahan ruka tha wahin se le raha hoon...") }
                     }
-                    Transfer.receive(this, sockets, progress, resume)
-                    error = null
-                    break
+                    val n = Transfer.receive(
+                        this, sockets, progress, resume, secret, { names -> askDuplicates(names) }
+                    ) {
+                        if (waiting) {
+                            waiting = false
+                            ui.post {
+                                if (gen == generation) {
+                                    onTransferStarted("Nayi files aa rahi hain...")
+                                    doneBox.visibility = View.GONE
+                                    btnPause.visibility = View.VISIBLE
+                                }
+                            }
+                        }
+                    }
+                    tries = 0
+                    if (n > 0 || batches == 0) {
+                        batches++
+                        ui.post { if (gen == generation) onBatchDone("Download/DropSwift mein save ho gayi", true) }
+                    }
+                    waiting = true
+                    Thread.sleep(4000)
                 } catch (e: Throwable) {
                     closeAttempt()
                     if (gen != generation) return@thread
@@ -1645,6 +2087,17 @@ class MainActivity : Activity() {
                         while (paused && gen == generation) Thread.sleep(300)
                         if (gen != generation) return@thread
                         tries = 0
+                        continue
+                    }
+                    if (waiting) {
+                        // Just checking for new files and the sender is gone: it has stopped sharing.
+                        pollFails++
+                        if (pollFails >= 4) {
+                            endedQuietly = true
+                            break
+                        }
+                        Thread.sleep(3000)
+                        owner = null
                         continue
                     }
                     if (!started || !retryable(e) || tries >= MAX_RETRY) {
@@ -1662,25 +2115,10 @@ class MainActivity : Activity() {
                     owner = null
                 }
             }
-            ui.post { if (gen == generation) onTransferEnded(error, "Download/DropSwift mein save ho gayi") }
-        }
-    }
-
-    private fun waitForOwner(gen: Int, deadline: Long, cb: (InetAddress?) -> Unit) {
-        val m = p2p
-        val c = channel
-        if (m == null || c == null || gen != generation) {
-            cb(null)
-            return
-        }
-        m.requestConnectionInfo(c) { info ->
-            val owner = info?.groupOwnerAddress
-            if (info != null && info.groupFormed && owner != null) {
-                cb(owner)
-            } else if (SystemClock.elapsedRealtime() > deadline) {
-                cb(null)
+            if (endedQuietly) {
+                ui.post { if (gen == generation) stopEverything("Bhejne wale ne share band kar diya. Jo files aayi thi woh sab save hain.") }
             } else {
-                ui.postDelayed({ waitForOwner(gen, deadline, cb) }, 500)
+                ui.post { if (gen == generation) onTransferEnded(error, "Download/DropSwift mein save ho gayi") }
             }
         }
     }
@@ -1733,7 +2171,7 @@ class MainActivity : Activity() {
         thread(name = "ds-net-send") {
             var error: Throwable? = null
             try {
-                val items = Transfer.describe(this, uris)
+                val items = chosenItems(uris)
                 progress.total = items.sumOf { it.size }
                 link.send(code, items, progress) {
                     ui.post { if (gen == generation) onTransferStarted("Internet se file ja rahi hai...") }
@@ -1791,7 +2229,21 @@ class MainActivity : Activity() {
         heatTicks = 0
         heatTold = false
         historyWho = ""
+        autoMode = false
+        autoSwitched = false
+        peerBreaks.set(0)
+        serversUp = false
+        linkFreq = 0
+        joinSsid = ""
+        joinPass = ""
+        lanJoin = false
+        addingMore = false
+        qualityView.text = ""
+        btnAddMore.visibility = View.GONE
+        resume.received.clear()
+        resume.senderName = ""
         setBusy(true)
+        TransferService.silent = flag("silent")
         TransferService.start(applicationContext, "DropSwift tayyar ho raha hai")
         return generation
     }
@@ -1849,6 +2301,7 @@ class MainActivity : Activity() {
             if (gen != generation) return@requestGroupInfo
             val f = group?.frequency ?: 0
             if (f > 0) {
+                linkFreq = f
                 val band = when {
                     f >= 5925 -> "6 GHz"
                     f >= 4900 -> "5 GHz"
@@ -1948,6 +2401,7 @@ class MainActivity : Activity() {
             if (!paused) {
                 emaSpeed = if (emaSpeed <= 0) mbps else emaSpeed * 0.8 + mbps * 0.2
                 watchSpeed(mbps)
+                showQuality(emaSpeed)
             }
         }
         lastTickAt = now
@@ -1975,46 +2429,13 @@ class MainActivity : Activity() {
     }
 
     private fun onTransferEnded(error: Throwable?, okWord: String) {
-        val wasTransferring = transferring
-        transferring = false
-        val secs = if (wasTransferring) (SystemClock.elapsedRealtime() - startedAt) / 1000.0 else 0.0
-        val done = progress.done.get()
         if (error == null) {
-            bar.progress = 1000
-            val avg = if (secs > 0) done / 1048576.0 / secs else 0.0
-            speedView.text = String.format(Locale.US, "%.1f MB/s", avg)
-            val checked = progress.verified.get()
-            val integrity = if (checked > 0) "✓ 100% Original Verified (SHA-256) – sab $checked file" else okWord
-            detailView.text = String.format(
-                Locale.US, "%d file, %s, %.1f second mein (upar average speed, jaanch ka time mila ke)\n%s",
-                progress.files.get(), size(done), secs, integrity
-            )
-            say(if (checked > 0) "Ho gaya! $integrity. $okWord." else "Ho gaya! $okWord.")
-            val savedNow = ArrayList(progress.saved)
-            showReceived(savedNow)
-            showDoneButtons(savedNow)
-            try {
-                window.decorView.performHapticFeedback(
-                    if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.LONG_PRESS
-                )
-            } catch (_: Throwable) {
-            }
-            History.add(
-                applicationContext,
-                History.Entry(
-                    System.currentTimeMillis(), historyIn, historyWho.ifEmpty { "Phone" },
-                    maxOf(progress.files.get(), savedNow.size), done, avg, true,
-                    if (checked > 0) "100% verified" else "", savedNow.firstOrNull()?.second?.toString() ?: ""
-                )
-            )
-            log(String.format(
-                Locale.US, "result: %.1f MB/s avg, %s in %.1f s | %d connections | per connection: waited on Wi-Fi %.1f s, on storage %.1f s | verified %d",
-                avg, size(done), secs, progress.streams,
-                progress.netNanos.get() / 1e9 / progress.streams, progress.diskNanos.get() / 1e9 / progress.streams, checked
-            ))
+            onBatchDone(okWord, false)
         } else {
+            transferring = false
             log("failed: ${error.javaClass.simpleName}: ${error.message}")
             speedView.text = ""
+            qualityView.text = ""
             val why = diagnose(error)
             say(why)
             if (!why.startsWith("Theek hai, rok diya")) {
@@ -2022,7 +2443,7 @@ class MainActivity : Activity() {
                     applicationContext,
                     History.Entry(
                         System.currentTimeMillis(), historyIn, historyWho.ifEmpty { "Phone" },
-                        progress.files.get(), done, 0.0, false, why.take(120), ""
+                        progress.files.get(), progress.done.get(), 0.0, false, why.take(120), ""
                     )
                 )
             }
@@ -2030,6 +2451,60 @@ class MainActivity : Activity() {
         // Give the last bytes a moment to leave before the link is dropped.
         val gen = generation
         ui.postDelayed({ if (gen == generation) finishSession() }, 1500)
+    }
+
+    /** One batch arrived (or was sent) completely. [keepOpen]: the receiver stays to get files added later. */
+    private fun onBatchDone(okWord: String, keepOpen: Boolean) {
+        val wasTransferring = transferring
+        transferring = false
+        val secs = if (wasTransferring) (SystemClock.elapsedRealtime() - startedAt) / 1000.0 else 0.0
+        val done = progress.done.get()
+        val sentNow = maxOf(0L, done - progress.resumedBytes)
+        bar.progress = 1000
+        val avg = if (secs > 0) sentNow / 1048576.0 / secs else 0.0
+        speedView.text = String.format(Locale.US, "%.1f MB/s", avg)
+        qualityView.text = ""
+        val checked = progress.verified.get()
+        val integrity = if (checked > 0) "✓ 100% Original Verified (SHA-256) – $checked file" else okWord
+        val skippedNote = if (progress.resumedBytes > 0) "\n(${size(progress.resumedBytes)} pehle se tha, dobara nahi aaya)" else ""
+        detailView.text = String.format(
+            Locale.US, "%d file, %s, %.1f second mein (upar average speed, jaanch ka time mila ke)\n%s",
+            progress.files.get(), size(done), secs, integrity
+        ) + skippedNote
+        val from = resume.senderName
+        if (from.isNotEmpty() && historyIn) historyWho = from
+        say(
+            (if (checked > 0) "Ho gaya! $integrity. $okWord." else "Ho gaya! $okWord.") +
+                (if (keepOpen) " Bhejne wala aur file jodega toh apne-aap aa jayengi. Ho gaya toh 'Band karo' dabao." else "")
+        )
+        val savedNow = ArrayList(progress.saved)
+        showReceived(savedNow)
+        showDoneButtons(savedNow)
+        btnPause.visibility = View.GONE
+        if (keepOpen) btnCancel.text = "Band karo"
+        if (!flag("silent")) {
+            try {
+                window.decorView.performHapticFeedback(
+                    if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.LONG_PRESS
+                )
+            } catch (_: Throwable) {
+            }
+        }
+        if (!lanJoin && joinSsid.isNotEmpty()) rememberSender(joinSsid, joinPass, from)
+        notifyMaybe(if (keepOpen) "Ho gaya. Aur files ka intezaar..." else "Ho gaya", 100)
+        History.add(
+            applicationContext,
+            History.Entry(
+                System.currentTimeMillis(), historyIn, historyWho.ifEmpty { "Phone" },
+                maxOf(checked, savedNow.size), done, avg, true,
+                if (checked > 0) "100% verified" else "", savedNow.firstOrNull()?.second?.toString() ?: ""
+            )
+        )
+        log(String.format(
+            Locale.US, "result: %.1f MB/s avg, %s new (%s on the wire) in %.1f s, %s already there | %d connections | per connection: Wi-Fi %.1f s, storage %.1f s | verified %d",
+            avg, size(sentNow), size(progress.wireBytes.get()), secs, size(progress.resumedBytes), progress.streams,
+            progress.netNanos.get() / 1e9 / progress.streams, progress.diskNanos.get() / 1e9 / progress.streams, checked
+        ))
     }
 
     /** After a successful receive: Kholo / Share / Done. */
@@ -2132,6 +2607,9 @@ class MainActivity : Activity() {
         wakeLock = null
         paused = false
         btnPause.visibility = View.GONE
+        btnAddMore.visibility = View.GONE
+        serversUp = false
+        qualityView.text = ""
         TransferService.stop(applicationContext)
         // No half files left behind: anything not finished and checked is deleted.
         val leftover = resume.state
@@ -2188,6 +2666,8 @@ class MainActivity : Activity() {
         private const val REQ_PERMISSION = 11
         private const val REQ_PICK = 12
         private const val REQ_NOTIFY = 13
+        private const val REQ_FOLDER = 14
+        private const val REQ_SAVE_TREE = 15
         private const val MAX_RETRY = 5
     }
 }

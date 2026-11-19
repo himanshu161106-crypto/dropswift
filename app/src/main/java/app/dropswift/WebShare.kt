@@ -30,10 +30,13 @@ import kotlin.concurrent.thread
  */
 class WebShare(
     private val ctx: Context,
-    private val items: List<Transfer.Item>,
+    initialItems: List<Transfer.Item>,
     private val secret: String,
     private val onSaved: (String, Uri) -> Unit = { _, _ -> }
 ) : Closeable {
+
+    /** Files offered for download; can grow while sharing (queue). */
+    @Volatile var items: List<Transfer.Item> = initialItems
 
     /** Files sent to this phone from a browser (iPhone / laptop). */
     val upBytes = AtomicLong(0)
@@ -136,13 +139,14 @@ class WebShare(
                 return
             }
             if (rest.startsWith("f/")) {
+                val list = items
                 val index = rest.substring(2).substringBefore('/').toIntOrNull()
-                if (index == null || index < 0 || index >= items.size) {
+                if (index == null || index < 0 || index >= list.size) {
                     simple(out, 404, "Not found")
                     return
                 }
                 lastClient = deviceFrom(agent)
-                sendFile(out, items[index], range, head)
+                sendFile(out, list[index], range, head)
                 return
             }
             simple(out, 404, "Not found")
@@ -234,21 +238,14 @@ next()};
                     left -= n
                 }
             }
-            val v = ContentValues()
-            v.put(MediaStore.Downloads.IS_PENDING, 0)
-            ctx.contentResolver.update(uri, v, null, null)
+            Storage.finish(ctx, uri)
             ok = true
             uploaded.incrementAndGet()
             onSaved(name, uri)
             simple(out, 200, "OK")
         } finally {
             upActive.decrementAndGet()
-            if (!ok) {
-                try {
-                    ctx.contentResolver.delete(uri, null, null)
-                } catch (_: Exception) {
-                }
-            }
+            if (!ok) Storage.remove(ctx, uri)
         }
     }
 

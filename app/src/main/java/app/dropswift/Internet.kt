@@ -373,9 +373,7 @@ class InternetLink(private val ctx: Context, private val log: (String) -> Unit) 
                         out = null
                         val u = uri
                         if (u != null) {
-                            val v = ContentValues()
-                            v.put(MediaStore.Downloads.IS_PENDING, 0)
-                            ctx.contentResolver.update(u, v, null, null)
+                            Storage.finish(ctx, u)
                             p.saved.add(Pair(name, u))
                             p.files.incrementAndGet()
                         }
@@ -398,10 +396,7 @@ class InternetLink(private val ctx: Context, private val log: (String) -> Unit) 
             }
             val u = uri
             if (!finished && u != null) {
-                try {
-                    ctx.contentResolver.delete(u, null, null)
-                } catch (_: Exception) {
-                }
+                Storage.remove(ctx, u)
             }
         }
     }
