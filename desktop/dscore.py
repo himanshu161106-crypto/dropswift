@@ -36,6 +36,18 @@ PACKED = {
 }
 
 
+def kill(s):
+    """shutdown() first: close() alone does nothing while a makefile() still refers to the socket."""
+    try:
+        s.shutdown(socket.SHUT_RDWR)
+    except Exception:
+        pass
+    try:
+        s.close()
+    except Exception:
+        pass
+
+
 class Stop(Exception):
     pass
 
@@ -201,10 +213,7 @@ class Receiver:
     def close(self):
         self.stop = True
         for s in list(self.socks):
-            try:
-                s.close()
-            except Exception:
-                pass
+            kill(s)
 
     def join(self):
         socks = []
@@ -367,10 +376,7 @@ class Receiver:
             except Exception as e:
                 errors.append(e)
                 for s in socks:
-                    try:
-                        s.close()
-                    except Exception:
-                        pass
+                    kill(s)
 
         ts = [threading.Thread(target=worker, args=(r,), daemon=True) for r in rd]
         for t in ts:
@@ -425,10 +431,7 @@ class Receiver:
         except OSError:
             pass
         for s in socks:
-            try:
-                s.close()
-            except OSError:
-                pass
+            kill(s)
         self.state = None
         return new
 
@@ -475,10 +478,7 @@ class Receiver:
                 break
             except Exception as e:
                 for s in self.socks:
-                    try:
-                        s.close()
-                    except OSError:
-                        pass
+                    kill(s)
                 if self.stop:
                     break
                 if waiting:
@@ -556,6 +556,16 @@ def send(socks, items, transfer_id, sender_name, secret, compress, encrypt, p, o
     errors = []
     END = object()
 
+    def put(item):
+        # Never block forever: if the senders stopped (link broke), give up and close the file.
+        while not errors:
+            try:
+                q.put(item, timeout=0.3)
+                return True
+            except queue.Full:
+                pass
+        return False
+
     def reader():
         try:
             for idx, it in enumerate(items):
@@ -573,21 +583,26 @@ def send(socks, items, transfer_id, sender_name, secret, compress, encrypt, p, o
                         if not b:
                             break
                         h.update(b)
-                        if bno not in skip:
-                            q.put(("b", idx, off, b))
+                        if bno not in skip and not put(("b", idx, off, b)):
+                            return
                         off += len(b)
                         bno += 1
-                q.put(("e", idx, off, h.digest()))
-            q.put(END)
+                if not put(("e", idx, off, h.digest())):
+                    return
+            put(END)
         except Exception as e:
             errors.append(e)
-            q.put(END)
 
     def sender(s):
         gcm = AESGCM(key) if key else None
         try:
             while True:
-                r = q.get()
+                try:
+                    r = q.get(timeout=0.3)
+                except queue.Empty:
+                    if errors:
+                        return
+                    continue
                 if r is END:
                     q.put(END)
                     s.sendall(bytes((REC_STREAM_END,)))
@@ -612,10 +627,7 @@ def send(socks, items, transfer_id, sender_name, secret, compress, encrypt, p, o
         except Exception as e:
             errors.append(e)
             for x in socks:
-                try:
-                    x.close()
-                except OSError:
-                    pass
+                kill(x)
 
     ts = [threading.Thread(target=reader, daemon=True)] + [threading.Thread(target=sender, args=(s,), daemon=True) for s in socks]
     for t in ts:
@@ -630,10 +642,7 @@ def send(socks, items, transfer_id, sender_name, secret, compress, encrypt, p, o
     except (OSError, EOFError) as e:
         raise IOError("not confirmed: %s" % e)
     for s in socks:
-        try:
-            s.close()
-        except OSError:
-            pass
+        kill(s)
     if ack == bytes((ACK_BAD,)):
         raise Corrupt("integrity failed: receiver found a mismatch")
     if ack != bytes((ACK_OK,)):
@@ -665,10 +674,8 @@ class Host:
         threading.Thread(target=self._accept, daemon=True).start()
 
     def close(self):
-        try:
-            self.srv.close()
-        except Exception:
-            pass
+        if self.srv:
+            kill(self.srv)
 
     def _accept(self):
         pending = {}
@@ -701,10 +708,7 @@ class Host:
             if ready:
                 self._serve(rid, ready[0], ready[1])
         except Exception:
-            try:
-                s.close()
-            except Exception:
-                pass
+            kill(s)
 
     def _serve(self, rid, name, socks):
         items, tid = self.batch

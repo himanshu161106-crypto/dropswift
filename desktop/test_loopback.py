@@ -54,6 +54,7 @@ def run(name, compress, encrypt, break_at=None, port=47900):
     err = rx.run(on_batch=lambda n: batches.append(n), on_status=lambda m: None, wait_for_more=False)
     dt = time.time() - t0
     host.close()
+    time.sleep(1)  # let the sender side finish closing its files
     assert err is None, "%s failed: %s" % (name, err)
     if break_at:
         assert cut[0] and rx.p.resumed > 0, "link was not cut or nothing was resumed"
