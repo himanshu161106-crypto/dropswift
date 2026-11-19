@@ -3,7 +3,7 @@
 Rule: a feature counts as done only after it passes here on real devices.
 For every test, send the "Show details" text from every phone.
 
-Install the same build on every phone first.
+Install the same build on every phone first. Build 16 does not connect to older builds.
 
 ## 1. Multi-device (1 sender, 3 receivers)
 - [ ] Sender: Send files → choose 1 big video → "Paas mein - QR dikhao".
@@ -37,3 +37,20 @@ Install the same build on every phone first.
 
 ## 7. Internet mode
 - [ ] One phone on Wi-Fi, other on mobile data: transfer works or Swifty explains "Network ki dikkat".
+
+## 8. Resume, pause, background (build 16)
+- [ ] Pause: start a 3–5 GB transfer, press Pause on the receiver at ~40%. Speed shows "Ruka hua". Press Resume: it continues from ~40%, not from 0. Receiver shows "(X pehle se tha, dobara nahi aaya)".
+- [ ] Auto resume: during a big transfer walk the receiver away until the link breaks, then come back. Swifty says "Link toot gaya, 3 second mein dobara jod raha hoon (1/5)" and it continues from where it stopped. Final result "100% Original Verified".
+- [ ] Give up: walk away and stay away. After 5 tries Swifty says the link broke. `Download/DropSwift` must have NO half file left.
+- [ ] Cancel mid-transfer: no half file left in `Download/DropSwift`.
+- [ ] Background: start a transfer, lock the screen for 1 minute. Notification shows % and time left. Unlock: transfer still running or done.
+- [ ] Background 2: start a transfer, open another app (YouTube) for 1 minute. Transfer keeps going.
+- [ ] Back button during a transfer: app goes to background, transfer keeps going.
+- [ ] Time left: shows "x min y sec baaki" and roughly matches the real time.
+- [ ] Success screen: Kholo opens the file, Share opens the share menu, Done clears the screen.
+- [ ] History: after 2–3 transfers, "History" shows them with speed; failed ones show ✗ and the reason; tapping a received one opens the file.
+- [ ] Battery under 20% and not charging: Swifty warns at the start.
+
+## 9. Hotspot mode and iPhone → Android
+- [ ] Sender hotspot on (5 GHz), receiver joins it. Sender: Send files → "Hotspot ya same Wi-Fi se". Receiver scans. Note speed and the "Network: … link … Mbps" line.
+- [ ] iPhone → Android: Android Receive → "iPhone ya laptop se lena". iPhone joins the Wi-Fi QR, opens the second QR, "Is phone ko file bhejo". File appears on Android in the list.

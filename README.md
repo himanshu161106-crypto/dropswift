@@ -74,6 +74,16 @@ Things that lower speed on any phone:
 | Swifty bot | Type what you want ("video bhejo", "file leni hai", "speed kam kyun"). On a problem it says whether the fault is the phone, the network or the app | Partly. Typed Hinglish pending |
 | Received files list | Tap a name to open the file | Pending |
 | Show details | A log at the bottom: link band, speed, where the time went | Yes |
+| Pause / Resume | Receiver can pause; resume continues from where it stopped | Pending |
+| Auto resume | If the link breaks, the receiver joins again (up to 5 tries) and only the missing parts are sent | Pending |
+| Retry only bad files | A file that fails the SHA-256 check is deleted and only that file is sent again | Pending |
+| No half files | On cancel or give-up, unfinished files are deleted | Pending |
+| Background transfer | Keeps running with the screen off or another app open; progress in the notification | Pending |
+| Time left | "2 min 40 sec baaki" next to the progress | Pending |
+| Success screen | Kholo / Share / Done after a receive | Pending |
+| History | Last 20 transfers with speed and result, kept only on the phone | Pending |
+| Hotspot / same Wi-Fi mode | Send over a phone hotspot or a home router instead of Wi-Fi Direct | Pending |
+| iPhone / laptop → Android | Upload from the browser page into the Android phone | Pending |
 
 ## What internet mode sends outside
 
@@ -81,8 +91,6 @@ File data never goes to a server. Two public services are used only to connect t
 
 ## Not there yet
 
-- Transfer keeps running with the screen off or the app in the background
-- Resume from where it stopped when the link breaks
 - A native iPhone app
 - Play Store release (see `PLAY_STORE.md`)
 
