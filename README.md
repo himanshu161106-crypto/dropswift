@@ -6,9 +6,8 @@ An Android app for sending files phone to phone. Nearby without internet, or far
 
 ## Download
 
-Latest APK: [Releases](https://github.com/himanshu161106-crypto/dropswift/releases/latest)
-
-Install the same build on both phones.
+- Android: the newest `build-N` release on the [Releases](https://github.com/himanshu161106-crypto/dropswift/releases) page (`DropSwift.apk`). Install the same build on every phone; build 17+ does not connect to older builds.
+- Windows / Mac: the newest `desktop-N` release (`DropSwift-Desktop-Windows.exe`, `DropSwift-Desktop-Mac.zip`). Not signed, so Windows SmartScreen / macOS Gatekeeper will warn the first time.
 
 ## How it works
 
@@ -83,6 +82,19 @@ Things that lower speed on any phone:
 | Success screen | Kholo / Share / Done after a receive | Pending |
 | History | Last 20 transfers with speed and result, kept only on the phone | Pending |
 | Hotspot / same Wi-Fi mode | Send over a phone hotspot or a home router instead of Wi-Fi Direct | Pending |
+| Duplicate detection | Same name and size already saved: Skip / Replace / Keep both | Pending |
+| Save folder | Download/DropSwift, or any folder the user picks (Settings) | Pending |
+| Transfer queue | "+ Aur file jodo" while sharing; connected phones get only the new files | Pending (protocol tested on laptop) |
+| Pin / recent senders | Phones you received from appear in Receive; join without a QR. Settings: change password | Pending |
+| Link quality | Strong / Medium / Weak (signal on hotspot/router, judged from speed on Wi-Fi Direct) | Pending |
+| File type filter | Photos & videos, Documents, Music, Apps (APK), Any file, Whole folder | Pending |
+| Auto mode | Picks 5 GHz if the phone supports it; if the link keeps breaking, moves everyone to 2.4 GHz | Pending |
+| Folder transfer | Whole folder with sub-folders, recreated on the receiver | Pending (protocol tested on laptop) |
+| Compression | Optional (Settings). Deflate per block, only for files that are not already packed | Pending (protocol tested on laptop) |
+| Encryption toggle | Optional (Settings). AES-256-GCM per block on top of the Wi-Fi password | Pending (protocol tested on laptop) |
+| Desktop app | Windows / Mac: receive from a phone (Wi-Fi name + password, or link) and send to a phone (QR, same Wi-Fi) | Laptop-to-laptop tests pass on Windows, Mac, Linux. With a phone: pending |
+| Silent mode | Notification minimised, no vibration. Android requires some notification for background work | Pending |
+| New UI | Robot, side-by-side Send/Receive, recent transfers, progress ring, file card, success screen, bottom menu | Pending |
 | iPhone / laptop → Android | Upload from the browser page into the Android phone | Pending |
 
 ## What internet mode sends outside

@@ -3,7 +3,7 @@
 Rule: a feature counts as done only after it passes here on real devices.
 For every test, send the "Show details" text from every phone.
 
-Install the same build on every phone first. Build 16 does not connect to older builds.
+Install the same build on every phone first. Build 17 and newer do not connect to build 16 or older.
 
 ## 1. Multi-device (1 sender, 3 receivers)
 - [ ] Sender: Send files → choose 1 big video → "Paas mein - QR dikhao".
@@ -54,3 +54,23 @@ Install the same build on every phone first. Build 16 does not connect to older 
 ## 9. Hotspot mode and iPhone → Android
 - [ ] Sender hotspot on (5 GHz), receiver joins it. Sender: Send files → "Hotspot ya same Wi-Fi se". Receiver scans. Note speed and the "Network: … link … Mbps" line.
 - [ ] iPhone → Android: Android Receive → "iPhone ya laptop se lena". iPhone joins the Wi-Fi QR, opens the second QR, "Is phone ko file bhejo". File appears on Android in the list.
+
+## 10. New in build 17–20
+- [ ] Duplicates: send the same file twice to the same phone. Second time: dialog Skip / Replace / Dono rakho. Skip = nothing sent.
+- [ ] Save folder: Settings → Files kahan save hon → Apna folder chuno. Receive a file: it lands there.
+- [ ] Queue: sender shares 1 file, receiver gets it. Sender taps "+ Aur file jodo", adds 2 files. Receiver gets only those 2 without scanning again.
+- [ ] Recent: after one receive, the next Receive shows "↻ <phone> se dobara". Tap it while the sender shows its QR: joins without scanning.
+- [ ] Link quality: shows Strong/Medium/Weak during a transfer; changes when you walk away.
+- [ ] File types: each picker option opens the right kind of files.
+- [ ] Auto mode: works like "Paas mein". Walk far so the link breaks twice: Swifty says it moved to 2.4 GHz and the transfer continues.
+- [ ] Folder: send a folder with sub-folders and 50+ files. Receiver has the same folders and file count.
+- [ ] Compression ON: send a big .txt/.csv. Log "on the wire" is smaller than the file. Photo/video: no change.
+- [ ] Encryption ON: transfer works and is "100% Original Verified". Note the speed vs OFF.
+- [ ] Silent mode ON: notification is hidden in the shade, no vibration at the end.
+- [ ] UI: home, progress ring, success screen, bottom menu look right; nothing overlaps on small screens.
+
+## 11. Desktop app
+- [ ] Windows, phone → laptop: phone Send → "Paas mein" → "iPhone ya laptop". Type the Wi-Fi name and password in "Phone se lo" → "Jodo aur lo". Files arrive in Downloads\DropSwift, verified.
+- [ ] Windows, laptop → phone: laptop and phone on the same Wi-Fi/hotspot. "Phone ko bhejo" → files → "Share shuru karo". Phone Receive → "Paas mein" → scan the QR on the laptop screen.
+- [ ] Mac: same two tests.
+- [ ] Pull the Wi-Fi mid-transfer on the laptop: it continues where it stopped when Wi-Fi returns.
