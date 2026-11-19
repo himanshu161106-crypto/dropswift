@@ -2123,6 +2123,25 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun waitForOwner(gen: Int, deadline: Long, cb: (InetAddress?) -> Unit) {
+        val m = p2p
+        val c = channel
+        if (m == null || c == null || gen != generation) {
+            cb(null)
+            return
+        }
+        m.requestConnectionInfo(c) { info ->
+            val owner = info?.groupOwnerAddress
+            if (info != null && info.groupFormed && owner != null) {
+                cb(owner)
+            } else if (SystemClock.elapsedRealtime() > deadline) {
+                cb(null)
+            } else {
+                ui.postDelayed({ waitForOwner(gen, deadline, cb) }, 500)
+            }
+        }
+    }
+
     private fun runJoin(gen: Int, owner: InetAddress, ssid: String, pass: String) {
         say("Jud gaya. File ka intezaar...")
         historyWho = "Paas wala phone"
