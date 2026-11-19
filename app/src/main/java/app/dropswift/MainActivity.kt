@@ -89,7 +89,16 @@ class MainActivity : Activity() {
     private lateinit var btnSendSelected: Button
     private lateinit var qrView: ImageView
     private lateinit var altView: TextView
-    private lateinit var bar: ProgressBar
+    private lateinit var bar: RingView
+    private lateinit var homeBox: LinearLayout
+    private lateinit var recentBox: LinearLayout
+    private lateinit var successBox: LinearLayout
+    private lateinit var successTitle: TextView
+    private lateinit var fileCard: LinearLayout
+    private lateinit var fileName: TextView
+    private lateinit var fileBar: ProgressBar
+    private lateinit var filePct: TextView
+    private lateinit var etaView: TextView
     private lateinit var btnSend: Button
     private lateinit var btnReceive: Button
     private lateinit var btnCancel: Button
@@ -194,7 +203,7 @@ class MainActivity : Activity() {
             }
         }
         if (!showLastCrash()) {
-            say("Namaste! Main Swifty hoon. File bhejni hai ya leni hai? Button dabao, ya neeche mujhse likh ke bolo, jaise \"video bhejo\" ya \"file leni hai\".")
+            say("Namaste! File bhejni hai ya leni hai?\nButton dabao, ya neeche likh ke bolo: \"video bhejo\".")
         }
     }
 
@@ -265,12 +274,52 @@ class MainActivity : Activity() {
         return b
     }
 
+    private fun outlined(fill: Int, stroke: Int, radiusDp: Int): GradientDrawable {
+        val g = rounded(fill, radiusDp)
+        g.setStroke(dp(1), stroke)
+        return g
+    }
+
+    /** Button with an icon on the left. */
+    private fun iconButton(label: String, icon: Int, bg: GradientDrawable, fg: Int): Button {
+        val b = Button(this)
+        b.text = label
+        b.isAllCaps = false
+        b.textSize = 16f
+        b.typeface = Typeface.DEFAULT_BOLD
+        b.setTextColor(fg)
+        b.background = bg
+        try {
+            val d = getDrawable(icon)?.mutate()
+            d?.setTint(fg)
+            d?.setBounds(0, 0, dp(22), dp(22))
+            b.setCompoundDrawables(d, null, null, null)
+            b.compoundDrawablePadding = dp(8)
+            b.setPadding(dp(18), 0, dp(18), 0)
+        } catch (_: Throwable) {
+        }
+        return b
+    }
+
+    private fun icon(res: Int, tint: Int, sizeDp: Int): ImageView {
+        val v = ImageView(this)
+        v.setImageResource(res)
+        v.setColorFilter(tint)
+        v.layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp))
+        return v
+    }
+
     private fun buildScreen() {
+        val bg = Color.parseColor("#0B0F19")
+        val surface = Color.parseColor("#151C2E")
+        val mint = Color.parseColor("#00E68A")
+        val grey = Color.parseColor("#9AA9BD")
+
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
         root.gravity = Gravity.CENTER_HORIZONTAL
-        root.setPadding(dp(20), dp(36), dp(20), dp(24))
-        root.setBackgroundColor(Color.parseColor("#0B0F19"))
+        root.setPadding(dp(20), dp(28), dp(20), dp(20))
+        root.setBackgroundColor(bg)
 
         val wide = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -283,29 +332,33 @@ class MainActivity : Activity() {
             return v
         }
 
-        val title = text(28f, Color.parseColor("#00E68A"), true)
-        title.text = "DropSwift"
+        // ---- header
+        val title = text(28f, mint, true)
+        title.text = "⚡ DropSwift"
         root.addView(title, wide)
+        val tagline = text(13f, grey)
+        tagline.text = "Fast. Secure. Original."
+        root.addView(tagline, wide)
         root.addView(gap(14))
 
-        // Swifty the bot + speech bubble
+        // ---- Swifty + speech bubble
         val botRow = LinearLayout(this)
         botRow.orientation = LinearLayout.HORIZONTAL
         botRow.gravity = Gravity.CENTER_VERTICAL
         botView = ImageView(this)
         botView.setImageResource(R.drawable.bot)
-        botRow.addView(botView, LinearLayout.LayoutParams(dp(64), dp(64)))
+        botRow.addView(botView, LinearLayout.LayoutParams(dp(96), dp(96)))
         statusView = TextView(this)
         statusView.textSize = 15f
         statusView.setTextColor(Color.WHITE)
-        statusView.background = rounded(Color.parseColor("#1B2740"), 16)
-        statusView.setPadding(dp(14), dp(12), dp(14), dp(12))
+        statusView.background = outlined(surface, Color.parseColor("#263650"), 16)
+        statusView.setPadding(dp(16), dp(14), dp(16), dp(14))
         val bubbleParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         bubbleParams.leftMargin = dp(10)
         botRow.addView(statusView, bubbleParams)
         root.addView(botRow, wide)
         try {
-            val bob = ObjectAnimator.ofFloat(botView, "translationY", 0f, -dp(5).toFloat())
+            val bob = ObjectAnimator.ofFloat(botView, "translationY", 0f, -dp(6).toFloat())
             bob.duration = 900
             bob.repeatMode = ValueAnimator.REVERSE
             bob.repeatCount = ValueAnimator.INFINITE
@@ -317,32 +370,45 @@ class MainActivity : Activity() {
         tipView.visibility = View.GONE
         tipView.setPadding(0, dp(8), 0, 0)
         root.addView(tipView, wide)
-        root.addView(gap(18))
+        root.addView(gap(16))
 
-        btnSend = button("Send files", Color.parseColor("#00E68A"), Color.parseColor("#04130C"))
+        // ---- home: send / receive, search, recent, trust line
+        homeBox = LinearLayout(this)
+        homeBox.orientation = LinearLayout.VERTICAL
+        root.addView(homeBox, wide)
+
+        val actionRow = LinearLayout(this)
+        actionRow.orientation = LinearLayout.HORIZONTAL
+        btnSend = iconButton("Send files", R.drawable.ic_send, rounded(mint, 16), Color.parseColor("#04130C"))
         btnSend.setOnClickListener { onSendClicked() }
-        root.addView(btnSend, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58)))
-        root.addView(gap(12))
-
-        btnReceive = button("Receive files", Color.parseColor("#263650"), Color.WHITE)
+        val sendP = LinearLayout.LayoutParams(0, dp(58), 1f)
+        sendP.rightMargin = dp(6)
+        actionRow.addView(btnSend, sendP)
+        btnReceive = iconButton("Receive files", R.drawable.ic_receive, outlined(Color.parseColor("#1B2740"), Color.parseColor("#263650"), 16), Color.WHITE)
         btnReceive.setOnClickListener { onReceiveClicked() }
-        root.addView(btnReceive, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58)))
-        root.addView(gap(14))
+        val recvP = LinearLayout.LayoutParams(0, dp(58), 1f)
+        recvP.leftMargin = dp(6)
+        actionRow.addView(btnReceive, recvP)
+        homeBox.addView(actionRow, wide)
+        homeBox.addView(gap(14))
 
         // Talk to Swifty / find a file by name
         val askRow = LinearLayout(this)
         askRow.orientation = LinearLayout.HORIZONTAL
         askRow.gravity = Gravity.CENTER_VERTICAL
+        askRow.background = outlined(surface, Color.parseColor("#263650"), 14)
+        askRow.setPadding(dp(12), dp(4), dp(6), dp(4))
+        askRow.addView(icon(R.drawable.ic_search, mint, 22))
         askInput = EditText(this)
-        askInput.hint = "Swifty se bolo, ya file ka naam..."
+        askInput.hint = "File ka naam likho, ya Swifty se bolo..."
         askInput.setHintTextColor(Color.parseColor("#71829B"))
         askInput.setTextColor(Color.WHITE)
         askInput.textSize = 15f
         askInput.setSingleLine(true)
         askInput.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         askInput.imeOptions = EditorInfo.IME_ACTION_SEND
-        askInput.background = rounded(Color.parseColor("#151C2E"), 12)
-        askInput.setPadding(dp(14), dp(12), dp(14), dp(12))
+        askInput.background = null
+        askInput.setPadding(dp(10), dp(12), dp(8), dp(12))
         askInput.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_SEND) {
                 onAsk()
@@ -350,19 +416,17 @@ class MainActivity : Activity() {
             } else false
         }
         askRow.addView(askInput, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        val btnAsk = button("Bolo", Color.parseColor("#06B6D4"), Color.parseColor("#04130C"))
-        btnAsk.textSize = 15f
+        val btnAsk = button("Dhoondo", Color.parseColor("#263650"), mint)
+        btnAsk.textSize = 14f
         btnAsk.setOnClickListener { onAsk() }
-        val askBtnParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(48))
-        askBtnParams.leftMargin = dp(8)
-        askRow.addView(btnAsk, askBtnParams)
-        root.addView(askRow, wide)
+        askRow.addView(btnAsk, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(44)))
+        homeBox.addView(askRow, wide)
 
         searchBox = LinearLayout(this)
         searchBox.orientation = LinearLayout.VERTICAL
-        root.addView(searchBox, wide)
+        homeBox.addView(searchBox, wide)
 
-        btnSendSelected = button("Send", Color.parseColor("#00E68A"), Color.parseColor("#04130C"))
+        btnSendSelected = button("Send", mint, Color.parseColor("#04130C"))
         btnSendSelected.visibility = View.GONE
         btnSendSelected.setOnClickListener {
             if (!active && selected.isNotEmpty()) {
@@ -373,18 +437,59 @@ class MainActivity : Activity() {
         }
         val sendSelParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52))
         sendSelParams.topMargin = dp(8)
-        root.addView(btnSendSelected, sendSelParams)
-        root.addView(gap(14))
+        homeBox.addView(btnSendSelected, sendSelParams)
+        homeBox.addView(gap(18))
 
+        val recentHead = LinearLayout(this)
+        recentHead.orientation = LinearLayout.HORIZONTAL
+        recentHead.gravity = Gravity.CENTER_VERTICAL
+        val recentTitle = TextView(this)
+        recentTitle.text = "Recent Transfers"
+        recentTitle.textSize = 18f
+        recentTitle.typeface = Typeface.DEFAULT_BOLD
+        recentTitle.setTextColor(Color.WHITE)
+        recentHead.addView(recentTitle, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        val viewAll = TextView(this)
+        viewAll.text = "View all ›"
+        viewAll.textSize = 14f
+        viewAll.setTextColor(mint)
+        viewAll.setPadding(dp(8), dp(6), 0, dp(6))
+        viewAll.setOnClickListener { showHistory() }
+        recentHead.addView(viewAll)
+        homeBox.addView(recentHead, wide)
+
+        recentBox = LinearLayout(this)
+        recentBox.orientation = LinearLayout.VERTICAL
+        val recentP = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        recentP.topMargin = dp(8)
+        homeBox.addView(recentBox, recentP)
+
+        val trust = LinearLayout(this)
+        trust.orientation = LinearLayout.HORIZONTAL
+        trust.gravity = Gravity.CENTER_VERTICAL
+        trust.background = outlined(surface, Color.parseColor("#1E3A30"), 14)
+        trust.setPadding(dp(14), dp(12), dp(14), dp(12))
+        trust.addView(icon(R.drawable.ic_shield, mint, 26))
+        val trustText = TextView(this)
+        trustText.text = "Secure. Fast. Private.\nFile seedhi phone se phone, har file SHA-256 se jaanchi hui."
+        trustText.textSize = 13f
+        trustText.setTextColor(grey)
+        trustText.setPadding(dp(12), 0, 0, 0)
+        trust.addView(trustText)
+        val trustP = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        trustP.topMargin = dp(12)
+        homeBox.addView(trust, trustP)
+
+        // ---- transfer area
         linkView = text(13f, Color.parseColor("#FFCA69"))
         root.addView(linkView, wide)
-        root.addView(gap(10))
+        root.addView(gap(8))
 
         qrView = ImageView(this)
         qrView.visibility = View.GONE
-        qrView.setBackgroundColor(Color.WHITE)
-        qrView.setPadding(dp(10), dp(10), dp(10), dp(10))
-        root.addView(qrView, LinearLayout.LayoutParams(dp(260), dp(260)))
+        qrView.background = rounded(Color.WHITE, 18)
+        qrView.setPadding(dp(14), dp(14), dp(14), dp(14))
+        root.addView(qrView, LinearLayout.LayoutParams(dp(270), dp(270)))
 
         altView = text(14f, Color.parseColor("#06B6D4"), true)
         altView.visibility = View.GONE
@@ -401,43 +506,112 @@ class MainActivity : Activity() {
                 showPicker()
             }
         }
-        val addParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46))
+        val addParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
         addParams.topMargin = dp(6)
         root.addView(btnAddMore, addParams)
 
-        bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
-        bar.max = 1000
-        bar.visibility = View.GONE
-        root.addView(bar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(14)))
-        root.addView(gap(8))
+        // Success header
+        successBox = LinearLayout(this)
+        successBox.orientation = LinearLayout.VERTICAL
+        successBox.gravity = Gravity.CENTER_HORIZONTAL
+        successBox.visibility = View.GONE
+        val checkCircle = ImageView(this)
+        checkCircle.setImageResource(R.drawable.ic_check)
+        checkCircle.setColorFilter(mint)
+        val ring = GradientDrawable()
+        ring.shape = GradientDrawable.OVAL
+        ring.setColor(Color.parseColor("#0F2A22"))
+        ring.setStroke(dp(4), mint)
+        checkCircle.background = ring
+        checkCircle.setPadding(dp(26), dp(26), dp(26), dp(26))
+        successBox.addView(checkCircle, LinearLayout.LayoutParams(dp(120), dp(120)))
+        successTitle = text(26f, Color.WHITE, true)
+        successTitle.text = "Transfer Complete"
+        successTitle.setPadding(0, dp(12), 0, 0)
+        successBox.addView(successTitle, wide)
+        root.addView(successBox, wide)
 
-        speedView = text(34f, Color.parseColor("#00E68A"), true)
+        bar = RingView(this)
+        bar.max = 1000
+        bar.caption = "TRANSFERRING..."
+        bar.visibility = View.GONE
+        val ringP = LinearLayout.LayoutParams(dp(210), dp(210))
+        ringP.topMargin = dp(8)
+        root.addView(bar, ringP)
+
+        speedView = text(40f, mint, true)
         speedView.setOnClickListener { shareTheCode() }
         root.addView(speedView, wide)
 
-        qualityView = text(13f, Color.parseColor("#9AA9BD"), true)
+        qualityView = text(13f, grey, true)
         root.addView(qualityView, wide)
+        root.addView(gap(8))
 
-        detailView = text(14f, Color.parseColor("#9AA9BD"))
+        // File card: name, thin bar, percent
+        fileCard = LinearLayout(this)
+        fileCard.orientation = LinearLayout.VERTICAL
+        fileCard.background = outlined(surface, Color.parseColor("#263650"), 16)
+        fileCard.setPadding(dp(16), dp(12), dp(16), dp(14))
+        fileCard.visibility = View.GONE
+        fileName = TextView(this)
+        fileName.textSize = 15f
+        fileName.typeface = Typeface.DEFAULT_BOLD
+        fileName.setTextColor(Color.WHITE)
+        fileName.setSingleLine(true)
+        fileName.ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+        fileCard.addView(fileName, wide)
+        val fileRow = LinearLayout(this)
+        fileRow.orientation = LinearLayout.HORIZONTAL
+        fileRow.gravity = Gravity.CENTER_VERTICAL
+        fileBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+        fileBar.max = 1000
+        try {
+            fileBar.progressTintList = android.content.res.ColorStateList.valueOf(mint)
+            fileBar.progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#263650"))
+        } catch (_: Throwable) {
+        }
+        fileRow.addView(fileBar, LinearLayout.LayoutParams(0, dp(10), 1f))
+        filePct = TextView(this)
+        filePct.textSize = 13f
+        filePct.setTextColor(mint)
+        filePct.setPadding(dp(10), 0, 0, 0)
+        fileRow.addView(filePct)
+        val fileRowP = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        fileRowP.topMargin = dp(8)
+        fileCard.addView(fileRow, fileRowP)
+        root.addView(fileCard, wide)
+
+        etaView = text(14f, grey)
+        etaView.setPadding(0, dp(8), 0, 0)
+        root.addView(etaView, wide)
+
+        detailView = text(13f, grey)
+        detailView.setPadding(0, dp(4), 0, 0)
         root.addView(detailView, wide)
-        root.addView(gap(18))
+        root.addView(gap(14))
 
-        btnPause = button("Pause", Color.parseColor("#3A3320"), Color.parseColor("#FFE7A8"))
+        val ctrlRow = LinearLayout(this)
+        ctrlRow.orientation = LinearLayout.HORIZONTAL
+        btnPause = button("Ⅱ  Pause", Color.TRANSPARENT, mint)
+        btnPause.background = outlined(surface, Color.parseColor("#2E4A3E"), 14)
         btnPause.visibility = View.GONE
         btnPause.setOnClickListener { togglePause() }
-        val pauseParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50))
-        pauseParams.bottomMargin = dp(8)
-        root.addView(btnPause, pauseParams)
-
-        btnCancel = button("Cancel", Color.parseColor("#48232D"), Color.parseColor("#FFDCE0"))
+        val pauseParams = LinearLayout.LayoutParams(0, dp(54), 1f)
+        pauseParams.rightMargin = dp(6)
+        ctrlRow.addView(btnPause, pauseParams)
+        btnCancel = button("✕  Cancel", Color.TRANSPARENT, Color.parseColor("#FF8A8A"))
+        btnCancel.background = outlined(Color.parseColor("#2A1820"), Color.parseColor("#6B2A36"), 14)
         btnCancel.visibility = View.GONE
         btnCancel.setOnClickListener { stopEverything(if (hosting) "Band kar diya." else "Theek hai, rok diya.") }
-        root.addView(btnCancel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)))
+        val cancelP = LinearLayout.LayoutParams(0, dp(54), 1f)
+        cancelP.leftMargin = dp(6)
+        ctrlRow.addView(btnCancel, cancelP)
+        root.addView(ctrlRow, wide)
 
         doneBox = LinearLayout(this)
-        doneBox.orientation = LinearLayout.HORIZONTAL
+        doneBox.orientation = LinearLayout.VERTICAL
         doneBox.visibility = View.GONE
-        val doneParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52))
+        val doneParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         doneParams.topMargin = dp(10)
         root.addView(doneBox, doneParams)
 
@@ -450,16 +624,6 @@ class MainActivity : Activity() {
         logToggle.text = "Show details"
         logToggle.setPadding(dp(8), dp(8), dp(8), dp(8))
         logToggle.setOnClickListener { showLog(logView.visibility != View.VISIBLE) }
-        val historyLink = text(13f, Color.parseColor("#06B6D4"), true)
-        historyLink.text = "History (pichhle transfer)"
-        historyLink.setPadding(dp(8), dp(8), dp(8), dp(4))
-        historyLink.setOnClickListener { showHistory() }
-        root.addView(historyLink, wide)
-        val settingsLink = text(13f, Color.parseColor("#06B6D4"), true)
-        settingsLink.text = "Settings"
-        settingsLink.setPadding(dp(8), dp(4), dp(8), dp(4))
-        settingsLink.setOnClickListener { showSettings() }
-        root.addView(settingsLink, wide)
         root.addView(logToggle, wide)
         logView = TextView(this)
         logView.visibility = View.GONE
@@ -475,10 +639,69 @@ class MainActivity : Activity() {
         log("DropSwift build $version, Android ${Build.VERSION.RELEASE}, ${Build.MANUFACTURER} ${Build.MODEL}")
 
         val scroll = ScrollView(this)
-        scroll.setBackgroundColor(Color.parseColor("#0B0F19"))
+        scroll.setBackgroundColor(bg)
         scroll.isFillViewport = true
         scroll.addView(root)
-        setContentView(scroll)
+
+        // ---- bottom menu: Home / Transfers / Settings
+        val nav = LinearLayout(this)
+        nav.orientation = LinearLayout.HORIZONTAL
+        nav.setBackgroundColor(Color.parseColor("#0E1424"))
+        nav.setPadding(0, dp(6), 0, dp(6))
+        fun navItem(label: String, res: Int, color: Int, onClick: () -> Unit) {
+            val item = LinearLayout(this)
+            item.orientation = LinearLayout.VERTICAL
+            item.gravity = Gravity.CENTER
+            item.addView(icon(res, color, 24))
+            val t = TextView(this)
+            t.text = label
+            t.textSize = 12f
+            t.setTextColor(color)
+            t.gravity = Gravity.CENTER
+            item.addView(t)
+            item.setOnClickListener { onClick() }
+            nav.addView(item, LinearLayout.LayoutParams(0, dp(52), 1f))
+        }
+        navItem("Home", R.drawable.ic_home, mint) { scroll.smoothScrollTo(0, 0) }
+        navItem("Transfers", R.drawable.ic_transfers, grey) { showHistory() }
+        navItem("Settings", R.drawable.ic_settings, grey) { showSettings() }
+
+        val screen = LinearLayout(this)
+        screen.orientation = LinearLayout.VERTICAL
+        screen.setBackgroundColor(bg)
+        screen.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        screen.addView(nav, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        setContentView(screen)
+        refreshRecent()
+    }
+
+    /** Last 3 transfers on the home screen. */
+    private fun refreshRecent() {
+        recentBox.removeAllViews()
+        val list = History.list(applicationContext).take(3)
+        if (list.isEmpty()) {
+            val empty = text(14f, Color.parseColor("#9AA9BD"))
+            empty.text = "📂\nAbhi koi transfer nahi.\nSend ya Receive dabao."
+            empty.background = outlined(Color.parseColor("#151C2E"), Color.parseColor("#263650"), 16)
+            empty.setPadding(dp(14), dp(18), dp(14), dp(18))
+            recentBox.addView(empty)
+            return
+        }
+        val fmt = SimpleDateFormat("d MMM, h:mm a", Locale.US)
+        for (e in list) {
+            val row = TextView(this)
+            val mark = if (e.ok) "✓" else "✗"
+            val dir = if (e.incoming) "Received" else "Sent"
+            row.text = "$mark $dir · ${e.who}\n${e.files} file · ${size(e.bytes)} · ${fmt.format(Date(e.time))}"
+            row.textSize = 13f
+            row.setTextColor(if (e.ok) Color.parseColor("#C8D7E9") else Color.parseColor("#FF9A9A"))
+            row.background = rounded(Color.parseColor("#151C2E"), 12)
+            row.setPadding(dp(14), dp(10), dp(14), dp(10))
+            if (e.uri.isNotEmpty()) row.setOnClickListener { openFile(Uri.parse(e.uri)) }
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            lp.bottomMargin = dp(6)
+            recentBox.addView(row, lp)
+        }
     }
 
     // ------------------------------------------------------------- the bot
@@ -740,6 +963,8 @@ class MainActivity : Activity() {
     }
 
     private fun setBusy(busy: Boolean) {
+        homeBox.visibility = if (busy || doneBox.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        if (!busy) refreshRecent()
         btnSend.isEnabled = !busy
         btnReceive.isEnabled = !busy
         btnSend.alpha = if (busy) 0.4f else 1f
@@ -2241,6 +2466,9 @@ class MainActivity : Activity() {
         qrView.visibility = View.GONE
         doneBox.visibility = View.GONE
         doneBox.removeAllViews()
+        successBox.visibility = View.GONE
+        fileCard.visibility = View.GONE
+        etaView.text = ""
         paused = false
         btnPause.text = "Pause"
         btnPause.visibility = View.GONE
@@ -2382,8 +2610,12 @@ class MainActivity : Activity() {
         transferring = true
         holdWifi()
         qrView.visibility = View.GONE
+        altView.visibility = View.GONE
+        successBox.visibility = View.GONE
         bar.visibility = View.VISIBLE
         bar.progress = 0
+        bar.caption = if (historyIn) "RECEIVING..." else "TRANSFERRING..."
+        fileCard.visibility = View.VISIBLE
         say(word)
         startedAt = SystemClock.elapsedRealtime()
         lastTickAt = startedAt
@@ -2429,8 +2661,12 @@ class MainActivity : Activity() {
         val pct = if (total > 0) (done * 100 / total).toInt().coerceIn(0, 100) else 0
         val left = total - done
         val eta = if (!paused && emaSpeed > 0.3 && left > 0) etaText(left / 1048576.0 / emaSpeed) else ""
-        var line = "${progress.file}\n${size(done)} / ${size(total)}  ·  $pct%"
-        if (eta.isNotEmpty()) line += "  ·  $eta baaki"
+        fileName.text = progress.file.ifEmpty { "..." }
+        fileBar.progress = if (total > 0) ((done * 1000) / total).toInt().coerceIn(0, 1000) else 0
+        filePct.text = "$pct%"
+        etaView.text = if (paused) "⏸ Rok diya. Resume dabao" else if (eta.isNotEmpty()) "⏱ $eta left" else ""
+        var line = "${size(done)} / ${size(total)}  ·  ${progress.streams} streams" +
+            (if (linkFreq >= 4900) " · 5 GHz" else if (linkFreq > 0) " · 2.4 GHz" else "")
         if (progress.resumedBytes > 0) line += "\n(${size(progress.resumedBytes)} pehle se tha, dobara nahi aaya)"
         detailView.text = line
         notifyMaybe(
@@ -2480,15 +2716,21 @@ class MainActivity : Activity() {
         val done = progress.done.get()
         val sentNow = maxOf(0L, done - progress.resumedBytes)
         bar.progress = 1000
+        bar.visibility = View.GONE
+        fileCard.visibility = View.GONE
+        etaView.text = ""
+        successBox.visibility = View.VISIBLE
+        successTitle.text = "Transfer Complete"
         val avg = if (secs > 0) sentNow / 1048576.0 / secs else 0.0
         speedView.text = String.format(Locale.US, "%.1f MB/s", avg)
         qualityView.text = ""
         val checked = progress.verified.get()
         val integrity = if (checked > 0) "✓ 100% Original Verified (SHA-256) – $checked file" else okWord
         val skippedNote = if (progress.resumedBytes > 0) "\n(${size(progress.resumedBytes)} pehle se tha, dobara nahi aaya)" else ""
+        val firstName = progress.saved.firstOrNull()?.first ?: progress.file
         detailView.text = String.format(
-            Locale.US, "%d file, %s, %.1f second mein (upar average speed, jaanch ka time mila ke)\n%s",
-            progress.files.get(), size(done), secs, integrity
+            Locale.US, "%s\n%s • %d file • %.1f s\nSpeed achieved (jaanch mila ke)",
+            integrity, firstName, progress.files.get(), secs
         ) + skippedNote
         val from = resume.senderName
         if (from.isNotEmpty() && historyIn) historyWho = from
@@ -2526,30 +2768,42 @@ class MainActivity : Activity() {
         ))
     }
 
-    /** After a successful receive: Kholo / Share / Done. */
+    /** After a successful receive: Open file / Share / Done. */
     private fun showDoneButtons(saved: List<Pair<String, Uri>>) {
         doneBox.removeAllViews()
         if (saved.isEmpty()) return
-        fun add(label: String, bg: String, fg: String, onClick: () -> Unit) {
-            val b = button(label, Color.parseColor(bg), Color.parseColor(fg))
-            b.textSize = 15f
-            b.setOnClickListener { onClick() }
-            val lp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
-            lp.leftMargin = dp(3)
-            lp.rightMargin = dp(3)
-            doneBox.addView(b, lp)
-        }
-        add("Kholo", "#00E68A", "#04130C") { openFile(saved[0].second) }
-        add("Share", "#263650", "#FFFFFF") { shareFiles(saved.map { it.second }) }
-        add("Done", "#151C2E", "#C8D7E9") {
+        val open = button("Open file  →", Color.parseColor("#00E68A"), Color.parseColor("#04130C"))
+        open.textSize = 17f
+        open.typeface = Typeface.DEFAULT_BOLD
+        open.setOnClickListener { openFile(saved[0].second) }
+        doneBox.addView(open, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(56)))
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        val share = button("Share", Color.parseColor("#263650"), Color.WHITE)
+        share.setOnClickListener { shareFiles(saved.map { it.second }) }
+        val sp = LinearLayout.LayoutParams(0, dp(52), 1f)
+        sp.rightMargin = dp(6)
+        row.addView(share, sp)
+        val done = button("Done", Color.parseColor("#1B2740"), Color.parseColor("#C8D7E9"))
+        done.setOnClickListener {
             doneBox.visibility = View.GONE
+            successBox.visibility = View.GONE
             receivedBox.removeAllViews()
             speedView.text = ""
             detailView.text = ""
             linkView.text = ""
+            qualityView.text = ""
             bar.visibility = View.GONE
-            say("Aur kuch bhejna ya lena hai? Button dabao ya mujhse likh ke bolo.")
+            homeBox.visibility = if (active) View.GONE else View.VISIBLE
+            refreshRecent()
+            say("Namaste! File bhejni hai ya leni hai?")
         }
+        val dp2 = LinearLayout.LayoutParams(0, dp(52), 1f)
+        dp2.leftMargin = dp(6)
+        row.addView(done, dp2)
+        val rp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        rp.topMargin = dp(10)
+        doneBox.addView(row, rp)
         doneBox.visibility = View.VISIBLE
     }
 

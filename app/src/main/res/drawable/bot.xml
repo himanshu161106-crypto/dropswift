@@ -1,47 +1,32 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Swifty: DropSwift's own robot -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="64dp"
-    android:height="64dp"
-    android:viewportWidth="64"
-    android:viewportHeight="64">
+    android:width="120dp"
+    android:height="120dp"
+    android:viewportWidth="120"
+    android:viewportHeight="120">
+    <!-- glow under -->
+    <path android:fillColor="#3300E68A" android:pathData="M60,114m-34,0a34,5 0,1 1,68 0a34,5 0,1 1,-68 0" />
     <!-- antenna -->
-    <path
-        android:fillColor="#06B6D4"
-        android:pathData="M30.5,8h3v9h-3z" />
-    <path
-        android:fillColor="#FFCA69"
-        android:pathData="M32,6m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0" />
-    <!-- ears -->
-    <path
-        android:fillColor="#06B6D4"
-        android:pathData="M4,30h6v12h-6z" />
-    <path
-        android:fillColor="#06B6D4"
-        android:pathData="M54,30h6v12h-6z" />
+    <path android:fillColor="#C9D3DF" android:pathData="M58.5,6h3v10h-3z" />
+    <path android:fillColor="#00E68A" android:pathData="M60,6m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0" />
+    <!-- body -->
+    <path android:fillColor="#DDE4EC" android:pathData="M40,72h40a8,8 0,0 1,8 8v20a10,10 0,0 1,-10 10h-36a10,10 0,0 1,-10 -10v-20a8,8 0,0 1,8 -8z" />
+    <path android:fillColor="#0E1424" android:pathData="M48,80h24a5,5 0,0 1,5 5v12a5,5 0,0 1,-5 5h-24a5,5 0,0 1,-5 -5v-12a5,5 0,0 1,5 -5z" />
+    <path android:fillColor="#00E68A" android:pathData="M62,82l-10,10h6l-3,8l10,-11h-6z" />
+    <!-- arms -->
+    <path android:fillColor="#C9D3DF" android:pathData="M24,78a6,6 0,0 1,12 0v16a6,6 0,0 1,-12 0z" />
+    <path android:fillColor="#C9D3DF" android:pathData="M84,78a6,6 0,0 1,12 0v16a6,6 0,0 1,-12 0z" />
+    <!-- headphones -->
+    <path android:fillColor="#AEB9C6" android:pathData="M16,38a8,8 0,0 1,8 -8h2v28h-2a8,8 0,0 1,-8 -8z" />
+    <path android:fillColor="#AEB9C6" android:pathData="M104,38a8,8 0,0 0,-8 -8h-2v28h2a8,8 0,0 0,8 -8z" />
     <!-- head -->
-    <path
-        android:fillColor="#00E68A"
-        android:pathData="M18,16h28a10,10 0,0 1,10 10v20a10,10 0,0 1,-10 10h-28a10,10 0,0 1,-10 -10v-20a10,10 0,0 1,10 -10z" />
-    <!-- face plate -->
-    <path
-        android:fillColor="#0B0F19"
-        android:pathData="M20,23h24a6,6 0,0 1,6 6v12a6,6 0,0 1,-6 6h-24a6,6 0,0 1,-6 -6v-12a6,6 0,0 1,6 -6z" />
+    <path android:fillColor="#EEF2F6" android:pathData="M36,14h48a14,14 0,0 1,14 14v28a14,14 0,0 1,-14 14h-48a14,14 0,0 1,-14 -14v-28a14,14 0,0 1,14 -14z" />
+    <!-- visor -->
+    <path android:fillColor="#0B0F19" android:pathData="M40,22h40a9,9 0,0 1,9 9v20a9,9 0,0 1,-9 9h-40a9,9 0,0 1,-9 -9v-20a9,9 0,0 1,9 -9z" />
     <!-- eyes -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M24,32m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M40,32m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0" />
+    <path android:fillColor="#00E68A" android:pathData="M48,35a5,6 0,1 1,10 0a5,6 0,1 1,-10 0z" />
+    <path android:fillColor="#00E68A" android:pathData="M62,35a5,6 0,1 1,10 0a5,6 0,1 1,-10 0z" />
     <!-- smile -->
-    <path
-        android:fillColor="#00E68A"
-        android:pathData="M25,39h14a7,5 0,0 1,-14 0z" />
-    <!-- cheeks -->
-    <path
-        android:fillColor="#FF8FA3"
-        android:pathData="M17,39m-2,0a2,2 0,1 1,4 0a2,2 0,1 1,-4 0" />
-    <path
-        android:fillColor="#FF8FA3"
-        android:pathData="M47,39m-2,0a2,2 0,1 1,4 0a2,2 0,1 1,-4 0" />
+    <path android:fillColor="#00E68A" android:pathData="M52,47h16a8,5 0,0 1,-16 0z" />
 </vector>
