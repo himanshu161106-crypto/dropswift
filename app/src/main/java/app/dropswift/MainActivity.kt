@@ -9,6 +9,7 @@ import android.app.AlertDialog
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
@@ -18,6 +19,7 @@ import android.net.wifi.WifiManager
 import android.net.wifi.p2p.WifiP2pConfig
 import android.net.wifi.p2p.WifiP2pManager
 import android.os.Build
+import android.os.BatteryManager
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
@@ -29,6 +31,7 @@ import android.provider.MediaStore
 import android.provider.Settings
 import android.text.InputType
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
@@ -57,6 +60,10 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.security.SecureRandom
 import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import kotlin.concurrent.thread
 
@@ -97,6 +104,22 @@ class MainActivity : Activity() {
     @Volatile private var transferring = false
     private val openThings = ArrayList<Closeable>()
     private var wifiLock: WifiManager.WifiLock? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+
+    // Receiver: what we already have, so a broken link or a pause continues where it stopped.
+    private val resume = ResumeStore()
+    @Volatile private var paused = false
+    private val attemptThings = ArrayList<Closeable>()
+    private var receiverId = 0L
+    private var hostTransferId = 0L
+    private var emaSpeed = 0.0
+    private var lastNotifyAt = 0L
+    private var heatTicks = 0
+    private var heatTold = false
+    private var historyWho = ""
+    private var historyIn = true
+    private lateinit var btnPause: Button
+    private lateinit var doneBox: LinearLayout
 
     private var progress = Progress()
     private var startedAt = 0L
@@ -104,11 +127,12 @@ class MainActivity : Activity() {
     private var lastTickBytes = 0L
 
     // Sender ("host") state: one link, many receivers.
-    private class Peer(val name: String) {
-        val p = Progress()
+    private class Peer(val id: Long, val name: String) {
+        @Volatile var p = Progress()
         @Volatile var status = "jud gaya"
         @Volatile var done = false
         @Volatile var ok = false
+        @Volatile var attempt = 0
     }
 
     private val peers: MutableList<Peer> = Collections.synchronizedList(ArrayList())
@@ -135,6 +159,15 @@ class MainActivity : Activity() {
         buildScreen()
         p2p = getSystemService(Context.WIFI_P2P_SERVICE) as? WifiP2pManager
         channel = p2p?.initialize(this, mainLooper, null)
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            // So the transfer can show in the notification bar while the screen is off.
+            try {
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFY)
+            } catch (_: Exception) {
+            }
+        }
         if (!showLastCrash()) {
             say("Namaste! Main Swifty hoon. File bhejni hai ya leni hai? Button dabao, ya neeche mujhse likh ke bolo, jaise \"video bhejo\" ya \"file leni hai\".")
         }
@@ -347,10 +380,24 @@ class MainActivity : Activity() {
         root.addView(detailView, wide)
         root.addView(gap(18))
 
+        btnPause = button("Pause", Color.parseColor("#3A3320"), Color.parseColor("#FFE7A8"))
+        btnPause.visibility = View.GONE
+        btnPause.setOnClickListener { togglePause() }
+        val pauseParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50))
+        pauseParams.bottomMargin = dp(8)
+        root.addView(btnPause, pauseParams)
+
         btnCancel = button("Cancel", Color.parseColor("#48232D"), Color.parseColor("#FFDCE0"))
         btnCancel.visibility = View.GONE
         btnCancel.setOnClickListener { stopEverything(if (hosting) "Band kar diya." else "Theek hai, rok diya.") }
         root.addView(btnCancel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)))
+
+        doneBox = LinearLayout(this)
+        doneBox.orientation = LinearLayout.HORIZONTAL
+        doneBox.visibility = View.GONE
+        val doneParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52))
+        doneParams.topMargin = dp(10)
+        root.addView(doneBox, doneParams)
 
         receivedBox = LinearLayout(this)
         receivedBox.orientation = LinearLayout.VERTICAL
@@ -361,6 +408,11 @@ class MainActivity : Activity() {
         logToggle.text = "Show details"
         logToggle.setPadding(dp(8), dp(8), dp(8), dp(8))
         logToggle.setOnClickListener { showLog(logView.visibility != View.VISIBLE) }
+        val historyLink = text(13f, Color.parseColor("#06B6D4"), true)
+        historyLink.text = "History (pichhle transfer)"
+        historyLink.setPadding(dp(8), dp(8), dp(8), dp(4))
+        historyLink.setOnClickListener { showHistory() }
+        root.addView(historyLink, wide)
         root.addView(logToggle, wide)
         logView = TextView(this)
         logView.visibility = View.GONE
@@ -450,6 +502,7 @@ class MainActivity : Activity() {
             if (pm.isPowerSaveMode) tips.add("Battery saver on hai, isse speed kam ho sakti hai.")
         } catch (_: Throwable) {
         }
+        batteryTip()?.let { tips.add(it) }
         if (receiving) {
             try {
                 val free = StatFs(Environment.getExternalStorageDirectory().path).availableBytes
@@ -458,6 +511,24 @@ class MainActivity : Activity() {
             }
         }
         return if (tips.isEmpty()) null else "Swifty ki salah: " + tips.joinToString(" ")
+    }
+
+    /** Battery low (and not charging) or phone hot. */
+    private fun batteryTip(): String? {
+        return try {
+            val bi = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return null
+            val level = bi.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+            val scale = bi.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
+            val plugged = bi.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0
+            val temp = bi.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) / 10.0
+            val pct = if (level >= 0 && scale > 0) level * 100 / scale else -1
+            val out = ArrayList<String>()
+            if (pct in 0..19 && !plugged) out.add("Battery $pct% hai, lamba transfer ho toh charger laga lo.")
+            if (temp >= 42.0) out.add(String.format(Locale.US, "Phone garam hai (%.0f°C), isse speed kam ho sakti hai.", temp))
+            if (out.isEmpty()) null else out.joinToString(" ")
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     /** Understands short Hindi/Hinglish/English requests typed to Swifty. Works offline. */
@@ -1131,6 +1202,7 @@ class MainActivity : Activity() {
     }
 
     private fun startServers(gen: Int, pass: String) {
+        hostTransferId = SecureRandom().nextLong()
         holdWifi()
         startHostTicker(gen)
 
@@ -1141,8 +1213,8 @@ class MainActivity : Activity() {
                 server.reuseAddress = true
                 server.receiveBufferSize = Transfer.SOCKET_BUFFER
                 server.bind(InetSocketAddress(Transfer.PORT))
-                Transfer.serve(server, pass, { c -> track(c) }) { name, sockets ->
-                    if (gen == generation) servePeer(gen, name, sockets)
+                Transfer.serve(server, pass, { c -> track(c) }) { id, name, sockets ->
+                    if (gen == generation) servePeer(gen, id, name, sockets)
                 }
             } catch (e: Throwable) {
                 log("host failed: ${e.message}")
@@ -1168,31 +1240,57 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Runs on its own thread for each receiver that joins. */
-    private fun servePeer(gen: Int, name: String, sockets: List<Socket>) {
-        val peer = Peer(name)
-        peers.add(peer)
-        log("receiver joined: $name")
-        ui.post { if (gen == generation) say("$name jud gaya, bhej raha hoon... Aur phone bhi scan kar sakte hain.") }
-        val t0 = SystemClock.elapsedRealtime()
-        try {
-            peer.status = "bhej raha hoon"
-            Transfer.send(this, sockets, hostItems, peer.p)
-            peer.ok = true
-            peer.status = "pahunch gayi, 100% match"
-        } catch (e: Throwable) {
-            peer.status = diagnose(e)
-            log("receiver $name failed: ${e.javaClass.simpleName}: ${e.message}")
+    /** Runs on its own thread for each receiver that joins (or joins again after a break). */
+    private fun servePeer(gen: Int, id: Long, name: String, sockets: List<Socket>) {
+        val peer = synchronized(peers) {
+            peers.firstOrNull { it.id == id } ?: Peer(id, name).also { peers.add(it) }
         }
+        val p = Progress()
+        val my = synchronized(peer) {
+            peer.attempt++
+            peer.p = p
+            peer.done = false
+            peer.ok = false
+            peer.status = "bhej raha hoon"
+            peer.attempt
+        }
+        val again = my > 1
+        log("receiver ${if (again) "joined again" else "joined"}: $name")
+        ui.post {
+            if (gen == generation) say(
+                if (again) "$name wapas juda. Jahan ruka tha wahin se bhej raha hoon..."
+                else "$name jud gaya, bhej raha hoon... Aur phone bhi scan kar sakte hain."
+            )
+        }
+        val t0 = SystemClock.elapsedRealtime()
+        var ok = false
+        var status: String
+        try {
+            Transfer.send(this, sockets, hostItems, hostTransferId, p)
+            ok = true
+            status = "pahunch gayi, 100% match"
+        } catch (e: Throwable) {
+            status = diagnose(e)
+            log("receiver $name stopped: ${e.javaClass.simpleName}: ${e.message}")
+        }
+        // A newer try from the same phone has taken over; let that one report.
+        if (peer.attempt != my) return
+        peer.ok = ok
+        peer.status = status
         peer.done = true
         val secs = (SystemClock.elapsedRealtime() - t0) / 1000.0
-        val dataSecs = peer.p.dataNanos / 1e9
-        val avg = if (dataSecs > 0) peer.p.done.get() / 1048576.0 / dataSecs else 0.0
+        val dataSecs = p.dataNanos / 1e9
+        val sent = p.done.get() - p.resumedBytes
+        val avg = if (dataSecs > 0) sent / 1048576.0 / dataSecs else 0.0
         log(String.format(
-            Locale.US, "result %s: %s | %.1f MB/s while sending, %s in %.1f s (%.1f s total with receiver's check) | per connection: waited on Wi-Fi %.1f s, on storage %.1f s",
-            name, if (peer.ok) "ok" else "failed", avg, size(peer.p.done.get()), dataSecs, secs,
-            peer.p.netNanos.get() / 1e9 / peer.p.streams, peer.p.diskNanos.get() / 1e9 / peer.p.streams
+            Locale.US, "result %s: %s | %.1f MB/s while sending, %s sent in %.1f s (%s already there) (%.1f s total with receiver's check) | per connection: waited on Wi-Fi %.1f s, on storage %.1f s",
+            name, if (ok) "ok" else "stopped", avg, size(sent), dataSecs, size(p.resumedBytes), secs,
+            p.netNanos.get() / 1e9 / p.streams, p.diskNanos.get() / 1e9 / p.streams
         ))
+        History.add(
+            applicationContext,
+            History.Entry(System.currentTimeMillis(), false, name, hostItems.size, p.total, avg, ok, status.take(120), "")
+        )
         ui.post { if (gen == generation) onPeerFinished() }
     }
 
@@ -1204,7 +1302,7 @@ class MainActivity : Activity() {
             say("Ho gaya! $ok phone ko bhej diya, sab mein 100% match. Aur phone ho toh QR scan karwao, warna Band karo dabao.")
         } else {
             val bad = list.first { !it.ok }
-            say("${ok}/${list.size} phone ko pahunchi. ${bad.name}: ${bad.status}")
+            say("${ok}/${list.size} phone ko pahunchi. ${bad.name} ruka hua hai: ${bad.status} Woh phone apne-aap wapas judne ki koshish karega; QR khula rakho.")
         }
     }
 
@@ -1255,7 +1353,9 @@ class MainActivity : Activity() {
         val moved = list.sumOf { it.p.done.get() } + (w?.bytes?.get() ?: 0L) + (w?.upBytes?.get() ?: 0L)
         val dt = (now - lastTickAt) / 1000.0
         if (dt > 0 && (list.any { !it.done } || (w?.active?.get() ?: 0) > 0 || (w?.upActive?.get() ?: 0) > 0)) {
-            speedView.text = String.format(Locale.US, "%.1f MB/s", (moved - lastTickBytes) / 1048576.0 / dt)
+            val inst = maxOf(0.0, (moved - lastTickBytes) / 1048576.0 / dt)
+            emaSpeed = if (emaSpeed <= 0) inst else emaSpeed * 0.8 + inst * 0.2
+            speedView.text = String.format(Locale.US, "%.1f MB/s", inst)
         }
         lastTickAt = now
         lastTickBytes = moved
@@ -1264,7 +1364,7 @@ class MainActivity : Activity() {
             val total = peer.p.total
             val pct = if (total > 0) peer.p.done.get() * 100 / total else 0
             lines.add(
-                if (peer.done) "${peer.name}: ${if (peer.ok) "pahunch gayi ✓ 100% match" else "nahi pahunchi ✗"}"
+                if (peer.done) "${peer.name}: ${if (peer.ok) "pahunch gayi ✓ 100% Original Verified" else "ruka hua (wapas jud sakta hai)"}"
                 else if (total > 0 && pct >= 100) "${peer.name}: woh jaanch kar raha hai..."
                 else "${peer.name}: $pct%"
             )
@@ -1282,6 +1382,30 @@ class MainActivity : Activity() {
             val done = running.sumOf { it.p.done.get() }
             bar.visibility = View.VISIBLE
             if (total > 0) bar.progress = ((done * 1000) / total).toInt().coerceIn(0, 1000)
+            val left = total - done
+            val eta = if (emaSpeed > 0.3 && left > 0) etaText(left / 1048576.0 / emaSpeed) else ""
+            if (eta.isNotEmpty()) detailView.text = detailView.text.toString() + "\nBaaki: $eta"
+            val pct = if (total > 0) (done * 100 / total).toInt() else 0
+            notifyMaybe("Bhej raha hoon: ${running.size} phone, $pct%" + (if (eta.isNotEmpty()) ", $eta baaki" else ""), pct)
+        } else {
+            notifyMaybe("QR tayyar hai, lene wale ka intezaar", -1)
+        }
+    }
+
+    private fun notifyMaybe(text: String, pct: Int) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastNotifyAt < 1000) return
+        lastNotifyAt = now
+        TransferService.update(applicationContext, text, pct)
+    }
+
+    private fun etaText(secs: Double): String {
+        val s = secs.toLong()
+        return when {
+            s < 1 -> ""
+            s < 60 -> "$s sec"
+            s < 3600 -> "${s / 60} min ${s % 60} sec"
+            else -> "${s / 3600} ghante ${(s % 3600) / 60} min"
         }
     }
 
@@ -1330,7 +1454,7 @@ class MainActivity : Activity() {
                             stopEverything(netFault("bhejne wale phone se jud nahi paya. Dono phone paas rakho, uska QR khula rakho, aur dobara scan karo."))
                         } else {
                             showLinkBand(gen, 0)
-                            runJoin(gen, owner, pass)
+                            runJoin(gen, owner, ssid, pass)
                         }
                     }
                 }
@@ -1354,46 +1478,189 @@ class MainActivity : Activity() {
         val port = parts[2].trim().toIntOrNull() ?: Transfer.PORT
         val secret = parts[3].trim()
         val gen = beginSession()
+        historyWho = "Hotspot / same Wi-Fi"
         showTip(phoneCheck(true))
         linkView.text = "Hotspot / same Wi-Fi mode"
         say("Bhejne wale phone ko network pe dhoond raha hoon...")
-        val device = "${Build.MANUFACTURER} ${Build.MODEL}"
-        thread(name = "ds-join-lan") {
-            var error: Throwable? = null
-            try {
-                var owner: InetAddress? = null
-                val deadline = SystemClock.elapsedRealtime() + 15_000
-                while (owner == null && SystemClock.elapsedRealtime() < deadline && gen == generation) {
-                    for (ip in ips) {
-                        val probe = Socket()
-                        try {
-                            probe.connect(InetSocketAddress(ip, port), 1200)
-                            owner = InetAddress.getByName(ip)
-                        } catch (_: Exception) {
-                        } finally {
-                            try {
-                                probe.close()
-                            } catch (_: Exception) {
-                            }
-                        }
-                        if (owner != null) break
-                    }
-                    if (owner == null) Thread.sleep(500)
-                }
-                val found = owner ?: throw IOException("lan sender not found")
+        receiveLoop(gen, port, secret, null, "lan sender not found") { probeLan(gen, ips, port) }
+    }
+
+    /** Finds the sender on the hotspot / Wi-Fi. Runs on a worker thread. */
+    private fun probeLan(gen: Int, ips: List<String>, port: Int): InetAddress? {
+        val deadline = SystemClock.elapsedRealtime() + 15_000
+        while (SystemClock.elapsedRealtime() < deadline && gen == generation) {
+            for (ip in ips) {
+                val probe = Socket()
                 try {
-                    val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-                    val info = wifi.connectionInfo
-                    val line = "Network: ${info.frequency} MHz, link ${info.linkSpeed} Mbps"
-                    log(line)
-                    ui.post { if (gen == generation) linkView.text = line }
+                    probe.connect(InetSocketAddress(ip, port), 1200)
+                    try {
+                        val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                        val info = wifi.connectionInfo
+                        val line = "Network: ${info.frequency} MHz, link ${info.linkSpeed} Mbps"
+                        log(line)
+                        ui.post { if (gen == generation) linkView.text = line }
+                    } catch (_: Throwable) {
+                    }
+                    return InetAddress.getByName(ip)
+                } catch (_: Exception) {
+                } finally {
+                    try {
+                        probe.close()
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+            Thread.sleep(500)
+        }
+        return null
+    }
+
+    /** Joins the sender's Wi-Fi Direct link again if it dropped. Runs on a worker thread. */
+    @SuppressLint("MissingPermission")
+    private fun p2pOwnerBlocking(gen: Int, ssid: String, pass: String): InetAddress? {
+        val latch = CountDownLatch(1)
+        var result: InetAddress? = null
+        ui.post {
+            val m = p2p
+            val c = channel
+            if (m == null || c == null || gen != generation) {
+                latch.countDown()
+                return@post
+            }
+            m.requestConnectionInfo(c) { info ->
+                val owner = info?.groupOwnerAddress
+                if (info != null && info.groupFormed && owner != null) {
+                    result = owner
+                    latch.countDown()
+                } else {
+                    try {
+                        val cfg = WifiP2pConfig.Builder().setNetworkName(ssid).setPassphrase(pass).build()
+                        m.connect(c, cfg, object : WifiP2pManager.ActionListener {
+                            override fun onSuccess() {
+                                waitForOwner(gen, SystemClock.elapsedRealtime() + 30_000) { o ->
+                                    result = o
+                                    latch.countDown()
+                                }
+                            }
+
+                            override fun onFailure(reason: Int) {
+                                log("rejoin link failed, code $reason")
+                                latch.countDown()
+                            }
+                        })
+                    } catch (_: Throwable) {
+                        latch.countDown()
+                    }
+                }
+            }
+        }
+        latch.await(40, TimeUnit.SECONDS)
+        return result
+    }
+
+    private fun trackAttempt(c: Closeable) {
+        synchronized(attemptThings) { attemptThings.add(c) }
+    }
+
+    /** Closes only the current try's connections (used by Pause and after a failed try). */
+    private fun closeAttempt() {
+        val copy: List<Closeable>
+        synchronized(attemptThings) {
+            copy = ArrayList(attemptThings)
+            attemptThings.clear()
+        }
+        thread(name = "ds-close-try") {
+            for (c in copy) {
+                try {
+                    c.close()
                 } catch (_: Throwable) {
                 }
-                val sockets = Transfer.join(found, port, secret, device) { c -> track(c) }
-                ui.post { if (gen == generation) onTransferStarted("File aa rahi hai...") }
-                Transfer.receive(this, sockets, progress)
-            } catch (e: Throwable) {
-                error = e
+            }
+        }
+    }
+
+    private fun retryable(e: Throwable): Boolean {
+        val m = (e.message ?: "").lowercase(Locale.US)
+        if (e is SecurityException) return false
+        return !(m.contains("cancel") || m.contains("different dropswift version") || m.contains("old or foreign") ||
+            m.contains("enospc") || m.contains("no space") || m.contains("cannot create") || m.contains("permission"))
+    }
+
+    private fun togglePause() {
+        if (!active || hosting) return
+        if (!paused) {
+            paused = true
+            btnPause.text = "Resume"
+            say("Pause kar diya. Jo aa chuka hai woh safe hai. Resume dabao toh wahin se shuru hoga.")
+            closeAttempt()
+        } else {
+            paused = false
+            btnPause.text = "Pause"
+            say("Resume kar raha hoon...")
+        }
+    }
+
+    /**
+     * Receiver: join, receive, and if the link breaks, join again and continue where it stopped.
+     * Only after a first successful join; a sender that is never found fails straight away.
+     */
+    private fun receiveLoop(
+        gen: Int, port: Int, secret: String, firstOwner: InetAddress?, notFound: String,
+        reacquire: () -> InetAddress?
+    ) {
+        val device = "${Build.MANUFACTURER} ${Build.MODEL}"
+        receiverId = SecureRandom().nextLong()
+        historyIn = true
+        thread(name = "ds-join") {
+            var owner = firstOwner
+            var tries = 0
+            var started = false
+            var error: Throwable? = null
+            while (gen == generation) {
+                try {
+                    val o = owner ?: reacquire() ?: throw java.io.IOException(notFound)
+                    owner = o
+                    val sockets = Transfer.join(o, port, secret, device, receiverId) { c ->
+                        track(c)
+                        trackAttempt(c)
+                    }
+                    if (!started) {
+                        started = true
+                        ui.post {
+                            if (gen == generation) {
+                                onTransferStarted("File aa rahi hai...")
+                                btnPause.visibility = View.VISIBLE
+                            }
+                        }
+                    } else {
+                        ui.post { if (gen == generation) say("Wapas jud gaya. Jahan ruka tha wahin se le raha hoon...") }
+                    }
+                    Transfer.receive(this, sockets, progress, resume)
+                    error = null
+                    break
+                } catch (e: Throwable) {
+                    closeAttempt()
+                    if (gen != generation) return@thread
+                    if (paused) {
+                        while (paused && gen == generation) Thread.sleep(300)
+                        if (gen != generation) return@thread
+                        tries = 0
+                        continue
+                    }
+                    if (!started || !retryable(e) || tries >= MAX_RETRY) {
+                        error = e
+                        break
+                    }
+                    tries++
+                    log("try $tries failed: ${e.javaClass.simpleName}: ${e.message}")
+                    val msg = if (e is Transfer.Corrupt)
+                        "Kuch file raste mein kharab hui. Sirf woh file dobara mangwa raha hoon... ($tries/$MAX_RETRY)"
+                    else
+                        "Link toot gaya. 3 second mein dobara jod raha hoon, jo aa chuka hai woh dobara nahi aayega... ($tries/$MAX_RETRY)"
+                    ui.post { if (gen == generation) say(msg) }
+                    Thread.sleep(3000)
+                    owner = null
+                }
             }
             ui.post { if (gen == generation) onTransferEnded(error, "Download/DropSwift mein save ho gayi") }
         }
@@ -1418,20 +1685,10 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun runJoin(gen: Int, owner: InetAddress, pass: String) {
+    private fun runJoin(gen: Int, owner: InetAddress, ssid: String, pass: String) {
         say("Jud gaya. File ka intezaar...")
-        val device = "${Build.MANUFACTURER} ${Build.MODEL}"
-        thread(name = "ds-join") {
-            var error: Throwable? = null
-            try {
-                val sockets = Transfer.join(owner, Transfer.PORT, pass, device) { c -> track(c) }
-                ui.post { if (gen == generation) onTransferStarted("File aa rahi hai...") }
-                Transfer.receive(this, sockets, progress)
-            } catch (e: Throwable) {
-                error = e
-            }
-            ui.post { if (gen == generation) onTransferEnded(error, "Download/DropSwift mein save ho gayi") }
-        }
+        historyWho = "Paas wala phone"
+        receiveLoop(gen, Transfer.PORT, pass, owner, "sender not reachable") { p2pOwnerBlocking(gen, ssid, pass) }
     }
 
     // --------------------------------------------------------- internet mode
@@ -1439,6 +1696,8 @@ class MainActivity : Activity() {
     private fun startInternetReceive() {
         if (active) return
         val gen = beginSession()
+        historyWho = "Internet"
+        historyIn = true
         showTip(phoneCheck(true))
         val code = randomText(8)
         shareCode = code
@@ -1464,6 +1723,8 @@ class MainActivity : Activity() {
         val uris = pickedUris
         if (uris.isEmpty()) return
         val gen = beginSession()
+        historyWho = "Internet"
+        historyIn = false
         showTip(phoneCheck(false))
         linkView.text = "Internet mode"
         say("Internet se doosre phone ko dhoond raha hoon... Dono phone pe internet on rakho.")
@@ -1521,7 +1782,17 @@ class MainActivity : Activity() {
         showTip(null)
         bar.visibility = View.GONE
         qrView.visibility = View.GONE
+        doneBox.visibility = View.GONE
+        doneBox.removeAllViews()
+        paused = false
+        btnPause.text = "Pause"
+        btnPause.visibility = View.GONE
+        emaSpeed = 0.0
+        heatTicks = 0
+        heatTold = false
+        historyWho = ""
         setBusy(true)
+        TransferService.start(applicationContext, "DropSwift tayyar ho raha hai")
         return generation
     }
 
@@ -1614,6 +1885,16 @@ class MainActivity : Activity() {
     }
 
     private fun holdWifi() {
+        if (wakeLock == null) {
+            try {
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                val wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dropswift:transfer")
+                wl.setReferenceCounted(false)
+                wl.acquire(6 * 60 * 60 * 1000L)
+                wakeLock = wl
+            } catch (_: Exception) {
+            }
+        }
         if (wifiLock != null) return
         try {
             val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -1655,20 +1936,42 @@ class MainActivity : Activity() {
             speedView.text = "Jaanch..."
             if (total > 0) bar.progress = ((v * 1000) / total).toInt().coerceIn(0, 1000)
             detailView.text = "File 100% sahi hai ya nahi, SHA-256 se jaanch rahe hain\n${size(v)} / ${size(total)}"
+            notifyMaybe("Jaanch rahe hain (SHA-256)...", if (total > 0) (v * 100 / total).toInt() else -1)
             return
         }
         val now = SystemClock.elapsedRealtime()
         val done = progress.done.get()
         val dt = (now - lastTickAt) / 1000.0
         if (dt > 0) {
-            val mbps = (done - lastTickBytes) / 1048576.0 / dt
-            speedView.text = String.format(Locale.US, "%.1f MB/s", mbps)
-            watchSpeed(mbps)
+            val mbps = maxOf(0.0, (done - lastTickBytes) / 1048576.0 / dt)
+            speedView.text = if (paused) "Ruka hua" else String.format(Locale.US, "%.1f MB/s", mbps)
+            if (!paused) {
+                emaSpeed = if (emaSpeed <= 0) mbps else emaSpeed * 0.8 + mbps * 0.2
+                watchSpeed(mbps)
+            }
         }
         lastTickAt = now
         lastTickBytes = done
         if (total > 0) bar.progress = ((done * 1000) / total).toInt().coerceIn(0, 1000)
-        detailView.text = "${progress.file}\n${size(done)} / ${size(total)}"
+        val pct = if (total > 0) (done * 100 / total).toInt().coerceIn(0, 100) else 0
+        val left = total - done
+        val eta = if (!paused && emaSpeed > 0.3 && left > 0) etaText(left / 1048576.0 / emaSpeed) else ""
+        var line = "${progress.file}\n${size(done)} / ${size(total)}  ·  $pct%"
+        if (eta.isNotEmpty()) line += "  ·  $eta baaki"
+        if (progress.resumedBytes > 0) line += "\n(${size(progress.resumedBytes)} pehle se tha, dobara nahi aaya)"
+        detailView.text = line
+        notifyMaybe(
+            (if (paused) "Ruka hua: " else if (historyIn) "Aa rahi hai: " else "Ja rahi hai: ") + "$pct%" +
+                (if (eta.isNotEmpty()) ", $eta baaki" else ""),
+            pct
+        )
+        heatTicks++
+        if (heatTicks % 100 == 0 && !heatTold) {
+            batteryTip()?.let {
+                heatTold = true
+                showTip("Swifty: $it")
+            }
+        }
     }
 
     private fun onTransferEnded(error: Throwable?, okWord: String) {
@@ -1681,13 +1984,29 @@ class MainActivity : Activity() {
             val avg = if (secs > 0) done / 1048576.0 / secs else 0.0
             speedView.text = String.format(Locale.US, "%.1f MB/s", avg)
             val checked = progress.verified.get()
-            val integrity = if (checked > 0) "sab $checked file 100% sahi (SHA-256 match)" else okWord
+            val integrity = if (checked > 0) "✓ 100% Original Verified (SHA-256) – sab $checked file" else okWord
             detailView.text = String.format(
                 Locale.US, "%d file, %s, %.1f second mein (upar average speed, jaanch ka time mila ke)\n%s",
                 progress.files.get(), size(done), secs, integrity
             )
             say(if (checked > 0) "Ho gaya! $integrity. $okWord." else "Ho gaya! $okWord.")
-            showReceived(ArrayList(progress.saved))
+            val savedNow = ArrayList(progress.saved)
+            showReceived(savedNow)
+            showDoneButtons(savedNow)
+            try {
+                window.decorView.performHapticFeedback(
+                    if (Build.VERSION.SDK_INT >= 30) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.LONG_PRESS
+                )
+            } catch (_: Throwable) {
+            }
+            History.add(
+                applicationContext,
+                History.Entry(
+                    System.currentTimeMillis(), historyIn, historyWho.ifEmpty { "Phone" },
+                    maxOf(progress.files.get(), savedNow.size), done, avg, true,
+                    if (checked > 0) "100% verified" else "", savedNow.firstOrNull()?.second?.toString() ?: ""
+                )
+            )
             log(String.format(
                 Locale.US, "result: %.1f MB/s avg, %s in %.1f s | %d connections | per connection: waited on Wi-Fi %.1f s, on storage %.1f s | verified %d",
                 avg, size(done), secs, progress.streams,
@@ -1696,11 +2015,102 @@ class MainActivity : Activity() {
         } else {
             log("failed: ${error.javaClass.simpleName}: ${error.message}")
             speedView.text = ""
-            say(diagnose(error))
+            val why = diagnose(error)
+            say(why)
+            if (!why.startsWith("Theek hai, rok diya")) {
+                History.add(
+                    applicationContext,
+                    History.Entry(
+                        System.currentTimeMillis(), historyIn, historyWho.ifEmpty { "Phone" },
+                        progress.files.get(), done, 0.0, false, why.take(120), ""
+                    )
+                )
+            }
         }
         // Give the last bytes a moment to leave before the link is dropped.
         val gen = generation
         ui.postDelayed({ if (gen == generation) finishSession() }, 1500)
+    }
+
+    /** After a successful receive: Kholo / Share / Done. */
+    private fun showDoneButtons(saved: List<Pair<String, Uri>>) {
+        doneBox.removeAllViews()
+        if (saved.isEmpty()) return
+        fun add(label: String, bg: String, fg: String, onClick: () -> Unit) {
+            val b = button(label, Color.parseColor(bg), Color.parseColor(fg))
+            b.textSize = 15f
+            b.setOnClickListener { onClick() }
+            val lp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+            lp.leftMargin = dp(3)
+            lp.rightMargin = dp(3)
+            doneBox.addView(b, lp)
+        }
+        add("Kholo", "#00E68A", "#04130C") { openFile(saved[0].second) }
+        add("Share", "#263650", "#FFFFFF") { shareFiles(saved.map { it.second }) }
+        add("Done", "#151C2E", "#C8D7E9") {
+            doneBox.visibility = View.GONE
+            receivedBox.removeAllViews()
+            speedView.text = ""
+            detailView.text = ""
+            linkView.text = ""
+            bar.visibility = View.GONE
+            say("Aur kuch bhejna ya lena hai? Button dabao ya mujhse likh ke bolo.")
+        }
+        doneBox.visibility = View.VISIBLE
+    }
+
+    private fun shareFiles(uris: List<Uri>) {
+        try {
+            val i = if (uris.size == 1) {
+                Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_STREAM, uris[0])
+            } else {
+                Intent(Intent.ACTION_SEND_MULTIPLE).putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
+            }
+            i.type = "*/*"
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            startActivity(Intent.createChooser(i, "Share karo"))
+        } catch (_: Exception) {
+            say(phoneFault("share karne wala koi app nahi mila."))
+        }
+    }
+
+    private fun showHistory() {
+        val list = History.list(applicationContext)
+        if (list.isEmpty()) {
+            say("Abhi tak koi transfer nahi hua. Pehla transfer karo, yahan dikhega.")
+            return
+        }
+        val fmt = SimpleDateFormat("d MMM, h:mm a", Locale.US)
+        val lines = list.map { e ->
+            val dir = if (e.incoming) "Aayi" else "Bheji"
+            val mark = if (e.ok) "✓" else "✗"
+            val speed = if (e.ok && e.mbps > 0) String.format(Locale.US, ", %.1f MB/s", e.mbps) else ""
+            "$mark ${fmt.format(Date(e.time))}  $dir · ${e.who}\n${e.files} file, ${size(e.bytes)}$speed" +
+                (if (!e.ok && e.note.isNotEmpty()) "\n${e.note}" else "")
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Pichhle transfer")
+            .setItems(lines) { _, which ->
+                val u = list[which].uri
+                if (u.isNotEmpty()) openFile(Uri.parse(u))
+            }
+            .setNegativeButton("Band karo", null)
+            .setNeutralButton("Saaf karo") { _, _ ->
+                History.clear(applicationContext)
+                say("History saaf kar di.")
+            }
+            .show()
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (active) {
+            // Going back would stop the transfer; keep it running in the background instead.
+            moveTaskToBack(true)
+            return
+        }
+        @Suppress("DEPRECATION")
+        super.onBackPressed()
     }
 
     private fun finishSession() {
@@ -1715,6 +2125,21 @@ class MainActivity : Activity() {
         } catch (_: Exception) {
         }
         wifiLock = null
+        try {
+            wakeLock?.release()
+        } catch (_: Exception) {
+        }
+        wakeLock = null
+        paused = false
+        btnPause.visibility = View.GONE
+        TransferService.stop(applicationContext)
+        // No half files left behind: anything not finished and checked is deleted.
+        val leftover = resume.state
+        resume.state = null
+        if (leftover != null) {
+            val ctx = applicationContext
+            thread(name = "ds-cleanup") { leftover.discardUnfinished(ctx) }
+        }
         closeAll()
         leaveGroup { }
         qrView.visibility = View.GONE
@@ -1744,6 +2169,16 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         generation++
+        TransferService.stop(applicationContext)
+        resume.state?.let { st ->
+            resume.state = null
+            val ctx = applicationContext
+            thread(name = "ds-cleanup") { st.discardUnfinished(ctx) }
+        }
+        try {
+            wakeLock?.release()
+        } catch (_: Exception) {
+        }
         closeAll()
         leaveGroup { }
         super.onDestroy()
@@ -1752,5 +2187,7 @@ class MainActivity : Activity() {
     companion object {
         private const val REQ_PERMISSION = 11
         private const val REQ_PICK = 12
+        private const val REQ_NOTIFY = 13
+        private const val MAX_RETRY = 5
     }
 }
